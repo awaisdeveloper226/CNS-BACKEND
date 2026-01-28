@@ -1,3 +1,5 @@
+// backend/controllers/instruction.controller.js
+
 const asyncHandler = require('express-async-handler');
 const mongoose = require('mongoose');
 const Instruction = require('../models/Instruction');
@@ -26,6 +28,7 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
             userName: i.user?.name || 'Anonymous',
             userLevel: i.user?.level || 1,
             notes: i.notes,
+            audioUrl: i.audioUrl, // NEW: Include audio URL
             type: i.type,
             category: i.category,
             photos: i.photos,
@@ -67,6 +70,7 @@ const getInstructionById = asyncHandler(async (req, res) => {
         userName: instruction.user?.name || 'Anonymous',
         userLevel: instruction.user?.level || 1,
         notes: instruction.notes,
+        audioUrl: instruction.audioUrl, // NEW: Include audio URL
         type: instruction.type,
         category: instruction.category,
         photos: instruction.photos,
@@ -86,12 +90,19 @@ const getInstructionById = asyncHandler(async (req, res) => {
    CREATE INSTRUCTION
    ========================================= */
 const createInstruction = asyncHandler(async (req, res) => {
-    const { businessId, notes, type, category, tags, photos = [], videos = [] } = req.body;
+    const { businessId, notes, audioUrl, type, category, tags, photos = [], videos = [] } = req.body;
     const userId = req.user._id;
 
-    if (!businessId || !notes || !type || !category) {
+    // UPDATED: Validate required fields
+    if (!businessId || !type || !category) {
         res.status(400);
-        throw new Error('Missing required fields');
+        throw new Error('Missing required fields: businessId, type, and category are required');
+    }
+
+    // UPDATED: Ensure either notes OR audioUrl is provided
+    if (!notes && !audioUrl) {
+        res.status(400);
+        throw new Error('Either notes or audioUrl must be provided');
     }
 
     const session = await mongoose.startSession();
@@ -102,7 +113,8 @@ const createInstruction = asyncHandler(async (req, res) => {
             [{
                 business: businessId,
                 user: userId,
-                notes,
+                notes: notes || '', // Provide empty string if not present
+                audioUrl: audioUrl || null, // NEW: Include audio URL
                 type,
                 category,
                 tags,
