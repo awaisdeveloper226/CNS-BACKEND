@@ -29,7 +29,12 @@ const InstructionSchema = new mongoose.Schema({
     },
     notes: {
         type: String,
-        required: true,
+        required: false, // CHANGED: Made optional since audio can replace text
+    },
+    // NEW: Audio instruction URL
+    audioUrl: {
+        type: String,
+        required: false,
     },
     type: {
         type: String,
@@ -66,7 +71,7 @@ const InstructionSchema = new mongoose.Schema({
         default: 0,
     },
     
-    // NEW: Array to prevent duplicate voting and track user's vote history
+    // Array to prevent duplicate voting and track user's vote history
     votedUsers: {
         type: [UserVoteSchema], 
         default: [],
@@ -77,7 +82,7 @@ const InstructionSchema = new mongoose.Schema({
         default: [],
     },
     
-    // NEW: Optional field to link official verified instructions (Section 6.1)
+    // Optional field to link official verified instructions (Section 6.1)
     isVerifiedBusinessInstruction: {
         type: Boolean,
         default: false,
@@ -90,5 +95,13 @@ const InstructionSchema = new mongoose.Schema({
 // Create a compound index to ensure a user can only vote on a specific instruction once
 InstructionSchema.index({ 'votedUsers.user': 1 }, { unique: false, sparse: true });
 
+// NEW: Custom validation - ensure either notes OR audioUrl is provided
+InstructionSchema.pre('validate', function(next) {
+    if (!this.notes && !this.audioUrl) {
+        next(new Error('Either notes or audioUrl must be provided'));
+    } else {
+        next();
+    }
+});
 
 module.exports = mongoose.model('Instruction', InstructionSchema);
