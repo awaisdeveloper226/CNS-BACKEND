@@ -36,6 +36,11 @@ const InstructionSchema = new mongoose.Schema({
         type: String,
         required: false,
     },
+    // NEW: Audio duration in seconds
+    audioDuration: {
+        type: Number,
+        required: false,
+    },
     type: {
         type: String,
         enum: ['Courier/Parcel Delivery', 'Food Delivery', 'Both'],
