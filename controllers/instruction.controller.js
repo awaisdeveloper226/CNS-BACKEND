@@ -28,7 +28,8 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
             userName: i.user?.name || 'Anonymous',
             userLevel: i.user?.level || 1,
             notes: i.notes,
-            audioUrl: i.audioUrl, // NEW: Include audio URL
+            audioUrl: i.audioUrl, // Include audio URL
+            audioDuration: i.audioDuration, // FIX: Include audio duration
             type: i.type,
             category: i.category,
             photos: i.photos,
@@ -70,7 +71,8 @@ const getInstructionById = asyncHandler(async (req, res) => {
         userName: instruction.user?.name || 'Anonymous',
         userLevel: instruction.user?.level || 1,
         notes: instruction.notes,
-        audioUrl: instruction.audioUrl, // NEW: Include audio URL
+        audioUrl: instruction.audioUrl, // Include audio URL
+        audioDuration: instruction.audioDuration, // FIX: Include audio duration
         type: instruction.type,
         category: instruction.category,
         photos: instruction.photos,
@@ -90,7 +92,7 @@ const getInstructionById = asyncHandler(async (req, res) => {
    CREATE INSTRUCTION
    ========================================= */
 const createInstruction = asyncHandler(async (req, res) => {
-    const { businessId, notes, audioUrl, type, category, tags, photos = [], videos = [] } = req.body;
+    const { businessId, notes, audioUrl, audioDuration, type, category, tags, photos = [], videos = [] } = req.body;
     const userId = req.user._id;
 
     // UPDATED: Validate required fields
@@ -114,7 +116,8 @@ const createInstruction = asyncHandler(async (req, res) => {
                 business: businessId,
                 user: userId,
                 notes: notes || '', // Provide empty string if not present
-                audioUrl: audioUrl || null, // NEW: Include audio URL
+                audioUrl: audioUrl || null, // Include audio URL
+                audioDuration: audioDuration || null, // FIX: Include audio duration
                 type,
                 category,
                 tags,
