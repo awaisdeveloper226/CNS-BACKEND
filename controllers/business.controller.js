@@ -66,7 +66,7 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     });
   }
 
-  // FIX: Map contributions with proper null/undefined handling
+  // FIX: Map contributions with proper null/undefined handling AND include audioUrl + audioDuration
   const detailedBusiness = {
     id: business._id,
     name: business.name,
@@ -78,9 +78,11 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     contributions: business.contributions.map((instr) => ({
       // Instruction fields
       id: instr._id,
-      notes: instr.notes,
+      notes: instr.notes || "",
       photos: instr.photos || [],
       videos: instr.videos || [],
+      audioUrl: instr.audioUrl || null, // FIX: Include audioUrl
+      audioDuration: instr.audioDuration || null, // FIX: Include audioDuration
       type: instr.type,
       category: instr.category,
       likes: instr.likes || 0,
