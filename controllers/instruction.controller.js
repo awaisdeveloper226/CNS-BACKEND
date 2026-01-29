@@ -7,6 +7,41 @@ const Business = require('../models/Business');
 const User = require('../models/User');
 
 /* =========================================
+   GAMIFICATION HELPER - CALCULATE LEVEL
+   ========================================= */
+const calculateUserLevel = (totalLikesReceived) => {
+    // Define level thresholds based on likes received
+    if (totalLikesReceived >= 100) return 10;
+    if (totalLikesReceived >= 50) return 9;
+    if (totalLikesReceived >= 30) return 8;
+    if (totalLikesReceived >= 20) return 7;
+    if (totalLikesReceived >= 15) return 6;
+    if (totalLikesReceived >= 10) return 5;
+    if (totalLikesReceived >= 7) return 4;
+    if (totalLikesReceived >= 5) return 3;
+    if (totalLikesReceived >= 3) return 2;
+    return 1;
+};
+
+/* =========================================
+   GAMIFICATION HELPER - GET BADGES FOR LEVEL
+   ========================================= */
+const getBadgesForLevel = (level) => {
+    // Return badges earned at each level milestone
+    const badges = [];
+    
+    if (level >= 1) badges.push('Rookie Courier');
+    if (level >= 3) badges.push('Expert Navigator');
+    if (level >= 5) badges.push('Local Guide');
+    if (level >= 10) badges.push('Master Mapper');
+    
+    // Optional: Additional special badges based on contributions/likes
+    // These can be expanded later
+    
+    return badges;
+};
+
+/* =========================================
    GET INSTRUCTIONS FOR A BUSINESS
    ========================================= */
 const getInstructionsByBusiness = asyncHandler(async (req, res) => {
@@ -28,8 +63,8 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
             userName: i.user?.name || 'Anonymous',
             userLevel: i.user?.level || 1,
             notes: i.notes,
-            audioUrl: i.audioUrl, // Include audio URL
-            audioDuration: i.audioDuration, // FIX: Include audio duration
+            audioUrl: i.audioUrl,
+            audioDuration: i.audioDuration,
             type: i.type,
             category: i.category,
             photos: i.photos,
@@ -71,8 +106,8 @@ const getInstructionById = asyncHandler(async (req, res) => {
         userName: instruction.user?.name || 'Anonymous',
         userLevel: instruction.user?.level || 1,
         notes: instruction.notes,
-        audioUrl: instruction.audioUrl, // Include audio URL
-        audioDuration: instruction.audioDuration, // FIX: Include audio duration
+        audioUrl: instruction.audioUrl,
+        audioDuration: instruction.audioDuration,
         type: instruction.type,
         category: instruction.category,
         photos: instruction.photos,
@@ -95,13 +130,13 @@ const createInstruction = asyncHandler(async (req, res) => {
     const { businessId, notes, audioUrl, audioDuration, type, category, tags, photos = [], videos = [] } = req.body;
     const userId = req.user._id;
 
-    // UPDATED: Validate required fields
+    // Validate required fields
     if (!businessId || !type || !category) {
         res.status(400);
         throw new Error('Missing required fields: businessId, type, and category are required');
     }
 
-    // UPDATED: Ensure either notes OR audioUrl is provided
+    // Ensure either notes OR audioUrl is provided
     if (!notes && !audioUrl) {
         res.status(400);
         throw new Error('Either notes or audioUrl must be provided');
@@ -115,9 +150,9 @@ const createInstruction = asyncHandler(async (req, res) => {
             [{
                 business: businessId,
                 user: userId,
-                notes: notes || '', // Provide empty string if not present
-                audioUrl: audioUrl || null, // Include audio URL
-                audioDuration: audioDuration || null, // FIX: Include audio duration
+                notes: notes || '',
+                audioUrl: audioUrl || null,
+                audioDuration: audioDuration || null,
                 type,
                 category,
                 tags,
@@ -155,7 +190,7 @@ const createInstruction = asyncHandler(async (req, res) => {
 });
 
 /* =========================================
-   LIKE / DISLIKE HANDLER
+   LIKE / DISLIKE HANDLER WITH AUTO LEVEL & BADGES UPDATE
    ========================================= */
 const handleVote = async (req, res, voteAction) => {
     const instructionId = req.params.id;
@@ -184,19 +219,22 @@ const handleVote = async (req, res, voteAction) => {
         );
 
         let update = {};
-        let userUpdate = {};
+        let likesChange = 0; // Track the change in likes
 
         if (voteIndex === -1) {
+            // New vote
             update = {
                 $inc: { [voteAction + 's']: 1 },
                 $push: { votedUsers: { user: userId, voteType: voteAction } },
             };
-            if (isLike) userUpdate = { $inc: { totalLikesReceived: 1 } };
+            if (isLike) likesChange = 1;
         } else if (instruction.votedUsers[voteIndex].voteType === voteAction) {
+            // Already voted the same way
             await session.abortTransaction();
             session.endSession();
             return res.status(200).json({ message: 'Already voted' });
         } else {
+            // Changing vote
             update = {
                 $inc: {
                     [voteAction + 's']: 1,
@@ -204,10 +242,7 @@ const handleVote = async (req, res, voteAction) => {
                 },
                 $set: { [`votedUsers.${voteIndex}.voteType`]: voteAction },
             };
-
-            userUpdate = isLike
-                ? { $inc: { totalLikesReceived: 1 } }
-                : { $inc: { totalLikesReceived: -1 } };
+            likesChange = isLike ? 1 : -1;
         }
 
         const updated = await Instruction.findByIdAndUpdate(
@@ -216,8 +251,35 @@ const handleVote = async (req, res, voteAction) => {
             { new: true, session }
         );
 
-        if (Object.keys(userUpdate).length) {
-            await User.findByIdAndUpdate(updated.user, userUpdate, { session });
+        // ✅ FIX: Update user's totalLikesReceived, level, AND badges
+        if (likesChange !== 0) {
+            // Get the instruction owner
+            const instructionOwner = await User.findById(updated.user).session(session);
+            
+            if (instructionOwner) {
+                const oldLevel = instructionOwner.level;
+                
+                // Update totalLikesReceived
+                instructionOwner.totalLikesReceived = (instructionOwner.totalLikesReceived || 0) + likesChange;
+                
+                // Calculate new level based on total likes received
+                const newLevel = calculateUserLevel(instructionOwner.totalLikesReceived);
+                
+                // Update level if it changed
+                if (newLevel !== oldLevel) {
+                    console.log(`🎉 Level up! User ${instructionOwner.name} is now level ${newLevel} (was ${oldLevel})`);
+                    instructionOwner.level = newLevel;
+                    
+                    // ✅ UPDATE BADGES: Get all badges for the new level
+                    const newBadges = getBadgesForLevel(newLevel);
+                    instructionOwner.badges = newBadges;
+                    
+                    console.log(`🏆 Badges updated for ${instructionOwner.name}:`, newBadges);
+                }
+                
+                // Save the user (this will update totalLikesReceived, level, and badges)
+                await instructionOwner.save({ session });
+            }
         }
 
         await session.commitTransaction();
