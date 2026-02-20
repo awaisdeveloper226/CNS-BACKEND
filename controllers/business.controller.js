@@ -66,7 +66,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     });
   }
 
-  // FIX: Map contributions with proper null/undefined handling AND include audioUrl + audioDuration
   const detailedBusiness = {
     id: business._id,
     name: business.name,
@@ -76,26 +75,21 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     isVerified: business.isVerified,
     coordinates: business.coordinates,
     contributions: business.contributions.map((instr) => ({
-      // Instruction fields
       id: instr._id,
       notes: instr.notes || "",
       photos: instr.photos || [],
       videos: instr.videos || [],
-      audioUrl: instr.audioUrl || null, // FIX: Include audioUrl
-      audioDuration: instr.audioDuration || null, // FIX: Include audioDuration
+      audioUrl: instr.audioUrl || null,
+      audioDuration: instr.audioDuration || null,
       type: instr.type,
       category: instr.category,
       likes: instr.likes || 0,
       dislikes: instr.dislikes || 0,
       timestamp: instr.createdAt,
       tags: instr.tags || [],
-      
-      // FIX: User fields with proper fallbacks
       userId: instr.user?._id?.toString() || 'unknown',
       userName: instr.user?.name || 'Anonymous User',
       userLevel: instr.user?.level || 1,
-      
-      // FIX: Include votedUsers for frontend vote tracking
       votedUsers: (instr.votedUsers || []).map(vote => ({
         userId: vote.user?.toString() || vote.user,
         voteType: vote.voteType
@@ -112,25 +106,16 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
  * @access  Private
  */
 const createBusiness = asyncHandler(async (req, res) => {
-  const { name, address, type, lat, lng, courierType } = req.body;
+  const { name, address, type, courierType } = req.body;
 
-  if (
-    !name ||
-    !address ||
-    !type ||
-    lat == null ||
-    lng == null ||
-    !courierType
-  ) {
+  if (!name || !address || !type || !courierType) {
     res.status(400);
-    throw new Error(
-      "Name, address, type, coordinates (lat/lng), and courier type are required"
-    );
+    throw new Error("Name, address, type, and courier type are required");
   }
 
-  if (!["Mall", "Standalone"].includes(type)) {
+  if (!["Mall", "Standalone", "Other"].includes(type)) {
     res.status(400);
-    throw new Error("Invalid business type. Must be Mall or Standalone.");
+    throw new Error("Invalid business type. Must be Mall, Standalone, or Other.");
   }
 
   const validCourierTypes = [
@@ -155,7 +140,6 @@ const createBusiness = asyncHandler(async (req, res) => {
     name,
     address,
     type,
-    coordinates: { lat, lng },
     tags: [courierType],
   });
 
