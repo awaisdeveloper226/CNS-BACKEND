@@ -5,12 +5,12 @@ const mongoose = require('mongoose');
 const Instruction = require('../models/Instruction');
 const Business = require('../models/Business');
 const User = require('../models/User');
+const Comment = require('../models/Comment'); // NEW
 
 /* =========================================
    GAMIFICATION HELPER - CALCULATE LEVEL
    ========================================= */
 const calculateUserLevel = (totalContributions) => {
-    // Define level thresholds based on contributions made
     if (totalContributions >= 100) return 10;
     if (totalContributions >= 50)  return 9;
     if (totalContributions >= 30)  return 8;
@@ -76,6 +76,19 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
         .populate('user', 'name level')
         .sort({ createdAt: -1 });
 
+    // NEW: Fetch comment counts for all instructions in one query
+    const instructionIds = instructions.map(i => i._id);
+    const commentCounts = await Comment.aggregate([
+        { $match: { instruction: { $in: instructionIds } } },
+        { $group: { _id: '$instruction', count: { $sum: 1 } } },
+    ]);
+
+    // NEW: Build a lookup map { instructionId: count }
+    const commentCountMap = {};
+    commentCounts.forEach(c => {
+        commentCountMap[c._id.toString()] = c.count;
+    });
+
     res.status(200).json(
         instructions.map(i => ({
             id: i._id.toString(),
@@ -97,6 +110,7 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
                 voteType: v.voteType,
             })),
             timestamp: i.createdAt,
+            commentCount: commentCountMap[i._id.toString()] || 0, // NEW
         }))
     );
 });
@@ -120,6 +134,9 @@ const getInstructionById = asyncHandler(async (req, res) => {
         throw new Error('Instruction not found');
     }
 
+    // NEW: Fetch comment count for this instruction
+    const commentCount = await Comment.countDocuments({ instruction: id });
+
     res.status(200).json({
         id: instruction._id.toString(),
         userId: instruction.user?._id,
@@ -140,6 +157,7 @@ const getInstructionById = asyncHandler(async (req, res) => {
             voteType: v.voteType,
         })),
         timestamp: instruction.createdAt,
+        commentCount, // NEW
     });
 });
 
@@ -195,7 +213,6 @@ const createInstruction = asyncHandler(async (req, res) => {
             { session }
         );
 
-        // ✅ Check and update level & badges after contribution count increases
         await updateUserLevelAndBadges(userId, session);
 
         await session.commitTransaction();
@@ -212,7 +229,6 @@ const createInstruction = asyncHandler(async (req, res) => {
 
 /* =========================================
    LIKE / DISLIKE HANDLER
-   (No longer updates level/badges — that's contribution-based now)
    ========================================= */
 const handleVote = async (req, res, voteAction) => {
     const instructionId = req.params.id;
@@ -243,18 +259,15 @@ const handleVote = async (req, res, voteAction) => {
         let update = {};
 
         if (voteIndex === -1) {
-            // New vote
             update = {
                 $inc: { [voteAction + 's']: 1 },
                 $push: { votedUsers: { user: userId, voteType: voteAction } },
             };
         } else if (instruction.votedUsers[voteIndex].voteType === voteAction) {
-            // Already voted the same way
             await session.abortTransaction();
             session.endSession();
             return res.status(200).json({ message: 'Already voted' });
         } else {
-            // Changing vote
             update = {
                 $inc: {
                     [voteAction + 's']: 1,
