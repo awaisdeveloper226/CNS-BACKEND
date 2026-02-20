@@ -55,7 +55,7 @@ const InstructionSchema = new mongoose.Schema({
             'Food Delivery Instructions',
             'Courier/Parcel Delivery Instructions',
         ],
-        required: true,
+        required: false,
     },
     photos: {
         type: [String], // URLs for images
