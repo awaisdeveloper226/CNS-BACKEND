@@ -36,14 +36,16 @@ app.get('/', (req, res) => {
 });
 
 // ==========================================================
-// API Routes (UPDATED to include the new 'community' route)
+// API Routes
 // ==========================================================
 app.use('/api/auth', require('./routes/auth.routes'));
 app.use('/api/businesses', require('./routes/business.routes'));
 app.use('/api/instructions', require('./routes/instruction.routes'));
-// --- NEW COMMUNITY ROUTE ---
-app.use('/api/community', require('./routes/community')); // Assuming the file is named 'community.js'
-// ---------------------------
+app.use('/api/community', require('./routes/community'));
+
+// --- NEW: Comment routes (nested under instructions) ---
+app.use('/api/instructions/:id/comments', require('./routes/comment.routes'));
+// -------------------------------------------------------
 
 // ==============================
 // Error Middleware (MUST be last)
