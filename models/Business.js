@@ -16,13 +16,10 @@ const businessSchema = mongoose.Schema(
         },
         type: {
             type: String,
-            enum: ['Mall', 'Standalone'],
+            enum: ['Mall', 'Standalone', 'Other'],
             required: true,
         },
-        coordinates: { // Section 8.1
-            lat: { type: Number, required: true },
-            lng: { type: Number, required: true },
-        },
+        
         totalContributions: { // Section 8.1 (Crowdsourcing metric)
             type: Number,
             default: 0,
