@@ -5,11 +5,8 @@ const mongoose = require('mongoose');
 const Instruction = require('../models/Instruction');
 const Business = require('../models/Business');
 const User = require('../models/User');
-const Comment = require('../models/Comment'); // NEW
+const Comment = require('../models/Comment');
 
-/* =========================================
-   GAMIFICATION HELPER - CALCULATE LEVEL
-   ========================================= */
 const calculateUserLevel = (totalContributions) => {
     if (totalContributions >= 100) return 10;
     if (totalContributions >= 50)  return 9;
@@ -23,26 +20,17 @@ const calculateUserLevel = (totalContributions) => {
     return 1;
 };
 
-/* =========================================
-   GAMIFICATION HELPER - GET BADGES FOR LEVEL
-   ========================================= */
 const getBadgesForLevel = (level) => {
     const badges = [];
-
     if (level >= 1)  badges.push('Rookie Courier');
     if (level >= 3)  badges.push('Expert Navigator');
     if (level >= 5)  badges.push('Local Guide');
     if (level >= 10) badges.push('Master Mapper');
-
     return badges;
 };
 
-/* =========================================
-   GAMIFICATION HELPER - UPDATE USER LEVEL & BADGES
-   ========================================= */
 const updateUserLevelAndBadges = async (userId, session) => {
     const user = await User.findById(userId).session(session);
-
     if (!user) return;
 
     const oldLevel = user.level;
@@ -51,19 +39,13 @@ const updateUserLevelAndBadges = async (userId, session) => {
     if (newLevel !== oldLevel) {
         console.log(`🎉 Level up! User ${user.name} is now level ${newLevel} (was ${oldLevel})`);
         user.level = newLevel;
-
         const newBadges = getBadgesForLevel(newLevel);
         user.badges = newBadges;
-
         console.log(`🏆 Badges updated for ${user.name}:`, newBadges);
-
         await user.save({ session });
     }
 };
 
-/* =========================================
-   GET INSTRUCTIONS FOR A BUSINESS
-   ========================================= */
 const getInstructionsByBusiness = asyncHandler(async (req, res) => {
     const { businessId } = req.params;
 
@@ -76,14 +58,12 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
         .populate('user', 'name level')
         .sort({ createdAt: -1 });
 
-    // NEW: Fetch comment counts for all instructions in one query
     const instructionIds = instructions.map(i => i._id);
     const commentCounts = await Comment.aggregate([
         { $match: { instruction: { $in: instructionIds } } },
         { $group: { _id: '$instruction', count: { $sum: 1 } } },
     ]);
 
-    // NEW: Build a lookup map { instructionId: count }
     const commentCountMap = {};
     commentCounts.forEach(c => {
         commentCountMap[c._id.toString()] = c.count;
@@ -110,14 +90,11 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
                 voteType: v.voteType,
             })),
             timestamp: i.createdAt,
-            commentCount: commentCountMap[i._id.toString()] || 0, // NEW
+            commentCount: commentCountMap[i._id.toString()] || 0,
         }))
     );
 });
 
-/* =========================================
-   GET SINGLE INSTRUCTION BY ID
-   ========================================= */
 const getInstructionById = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
@@ -134,7 +111,6 @@ const getInstructionById = asyncHandler(async (req, res) => {
         throw new Error('Instruction not found');
     }
 
-    // NEW: Fetch comment count for this instruction
     const commentCount = await Comment.countDocuments({ instruction: id });
 
     res.status(200).json({
@@ -157,13 +133,10 @@ const getInstructionById = asyncHandler(async (req, res) => {
             voteType: v.voteType,
         })),
         timestamp: instruction.createdAt,
-        commentCount, // NEW
+        commentCount,
     });
 });
 
-/* =========================================
-   CREATE INSTRUCTION
-   ========================================= */
 const createInstruction = asyncHandler(async (req, res) => {
     const { businessId, notes, audioUrl, audioDuration, type, category, tags, photos = [], videos = [] } = req.body;
     const userId = req.user._id;
@@ -227,9 +200,6 @@ const createInstruction = asyncHandler(async (req, res) => {
     }
 });
 
-/* =========================================
-   LIKE / DISLIKE HANDLER
-   ========================================= */
 const handleVote = async (req, res, voteAction) => {
     const instructionId = req.params.id;
     const userId = req.user._id;
@@ -259,15 +229,19 @@ const handleVote = async (req, res, voteAction) => {
         let update = {};
 
         if (voteIndex === -1) {
+            // No existing vote → add it
             update = {
                 $inc: { [voteAction + 's']: 1 },
                 $push: { votedUsers: { user: userId, voteType: voteAction } },
             };
         } else if (instruction.votedUsers[voteIndex].voteType === voteAction) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(200).json({ message: 'Already voted' });
+            // Same vote again → toggle off (remove it)
+            update = {
+                $inc: { [voteAction + 's']: -1 },
+                $pull: { votedUsers: { user: userId } },
+            };
         } else {
+            // Switching vote (like → dislike or vice versa)
             update = {
                 $inc: {
                     [voteAction + 's']: 1,
