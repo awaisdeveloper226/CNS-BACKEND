@@ -3,6 +3,7 @@
 const asyncHandler = require("express-async-handler");
 const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
+const Comment = require("../models/Comment");
 
 /**
  * @desc  Get all businesses (including search for frontend)
@@ -33,7 +34,7 @@ const getBusinesses = asyncHandler(async (req, res) => {
  */
 const getBusinessDetails = asyncHandler(async (req, res) => {
   console.log('🔍 Fetching business details for ID:', req.params.id);
-  
+
   const business = await Business.findById(req.params.id)
     .lean()
     .populate({
@@ -53,18 +54,26 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
 
   console.log('✅ Business found with', business.contributions?.length || 0, 'contributions');
 
-  // --- Server-Side Sorting for Rating ---
+  // Sort by rating
   if (business.contributions && business.contributions.length > 0) {
     business.contributions.sort((a, b) => {
       const scoreA = (a.likes || 0) - (a.dislikes || 0);
       const scoreB = (b.likes || 0) - (b.dislikes || 0);
-
-      if (scoreA !== scoreB) {
-        return scoreB - scoreA;
-      }
+      if (scoreA !== scoreB) return scoreB - scoreA;
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
   }
+
+  // Fetch comment counts for all contributions in one query
+  const instructionIds = business.contributions.map(i => i._id);
+  const commentCounts = await Comment.aggregate([
+    { $match: { instruction: { $in: instructionIds } } },
+    { $group: { _id: '$instruction', count: { $sum: 1 } } },
+  ]);
+  const commentCountMap = {};
+  commentCounts.forEach(c => {
+    commentCountMap[c._id.toString()] = c.count;
+  });
 
   const detailedBusiness = {
     id: business._id,
@@ -92,8 +101,9 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
       userLevel: instr.user?.level || 1,
       votedUsers: (instr.votedUsers || []).map(vote => ({
         userId: vote.user?.toString() || vote.user,
-        voteType: vote.voteType
-      }))
+        voteType: vote.voteType,
+      })),
+      commentCount: commentCountMap[instr._id.toString()] || 0,
     })),
   };
 
