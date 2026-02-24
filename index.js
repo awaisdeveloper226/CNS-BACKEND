@@ -1,5 +1,6 @@
 const express = require('express');
 const dotenv = require('dotenv');
+const cors = require('cors'); // Added CORS import
 const connectDB = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/error.middleware');
 
@@ -18,6 +19,17 @@ connectDB();
 // ==============================
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// ==============================
+// CORS Configuration
+// ==============================
+// This allows your Next.js frontend to talk to this API
+app.use(cors({
+  origin: ['http://localhost:3000', 'https://cns-backend-production.up.railway.app'], 
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
 
 // ==============================
 // Body parsers
