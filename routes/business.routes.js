@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 
 const { protect } = require('../middleware/auth.middleware'); // ASSUMED: Import required auth middleware
+const { uploadKeyOrProtect } = require('../middleware/uploadKey.middleware'); // ADD
 
 const {
   getBusinesses,
