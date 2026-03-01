@@ -21,10 +21,12 @@ const uploadKeyOrProtect = asyncHandler(async (req, res, next) => {
       'Web Contribution';
 
     // Rename the bot to the business name before saving
-    botUser.name = displayName;
-    await botUser.save();
-
-    req.user = botUser;
+    const updatedBot = await User.findByIdAndUpdate(
+  process.env.UPLOAD_BOT_USER_ID,
+  { name: displayName },
+  { new: true, runValidators: false } // ← skips validation entirely
+);
+req.user = updatedBot;
     return next();
   }
 
