@@ -1,36 +1,35 @@
 const express = require('express');
 const dotenv = require('dotenv');
-const cors = require('cors'); // Added CORS import
+const cors = require('cors');
 const connectDB = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/error.middleware');
 
-// ==============================
-// Load environment variables
-// ==============================
 dotenv.config();
-
-// ==============================
-// Connect Database
-// ==============================
 connectDB();
 
-// ==============================
-// Initialize app
-// ==============================
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ==============================
 // CORS Configuration
 // ==============================
-// This allows your Next.js frontend to talk to this API
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://cns-backend-production.up.railway.app'],
+  origin: function (origin, callback) {
+    const allowed = [
+      'https://cns-backend-production.up.railway.app',
+      'https://cns-business-and-instruction-upload.vercel.app',
+    ];
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin || allowed.includes(origin) || origin.endsWith('.vercel.app')) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-upload-key', 'x-business-name'],
   credentials: true
 }));
-
 
 // ==============================
 // Body parsers
@@ -48,17 +47,14 @@ app.get('/', (req, res) => {
   });
 });
 
-// ==========================================================
+// ==============================
 // API Routes
-// ==========================================================
+// ==============================
 app.use('/api/auth', require('./routes/auth.routes'));
 app.use('/api/businesses', require('./routes/business.routes'));
 app.use('/api/instructions', require('./routes/instruction.routes'));
 app.use('/api/community', require('./routes/community'));
-
-// --- NEW: Comment routes (nested under instructions) ---
 app.use('/api/instructions/:id/comments', require('./routes/comment.routes'));
-// -------------------------------------------------------
 
 // ==============================
 // Error Middleware (MUST be last)
