@@ -10,6 +10,7 @@ const {
 } = require('../controllers/instruction.controller');
 
 const { protect } = require('../middleware/auth.middleware');
+const { uploadKeyOrProtect } = require('../middleware/uploadKey.middleware'); // ADD
 
 // ---------------- PUBLIC ROUTES ----------------
 
@@ -25,7 +26,7 @@ router.get('/:id', getInstructionById);
 
 // Create instruction
 // POST /api/instructions
-router.post('/', protect, createInstruction);
+router.post('/', uploadKeyOrProtect, createInstruction);
 
 // Like instruction
 // PUT /api/instructions/:id/like
