@@ -17,6 +17,6 @@ router.get('/:id', getBusinessDetails);
 
 // Create business (Requires authentication - Section 2.2)
 // Enforced 'protect' middleware to ensure only logged-in users can create businesses
-router.post('/', protect, createBusiness);
+router.post('/', uploadKeyOrProtect, createBusiness);
 
 module.exports = router;
