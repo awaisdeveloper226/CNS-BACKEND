@@ -27,7 +27,7 @@ const PORT = process.env.PORT || 5000;
 app.use(cors({
   origin: ['http://localhost:3000', 'https://cns-backend-production.up.railway.app'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-upload-key'], // ← add this
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-upload-key', 'x-business-name'],
   credentials: true
 }));
 
