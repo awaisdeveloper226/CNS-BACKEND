@@ -3,21 +3,26 @@
 const express = require('express');
 const router = express.Router();
 
-const { protect } = require('../middleware/auth.middleware'); // ASSUMED: Import required auth middleware
-const { uploadKeyOrProtect } = require('../middleware/uploadKey.middleware'); // ADD
+const { protect } = require('../middleware/auth.middleware');
+const { uploadKeyOrProtect } = require('../middleware/uploadKey.middleware');
 
 const {
+  searchFoursquarePlaces,
   getBusinesses,
   getBusinessDetails,
   createBusiness,
 } = require('../controllers/business.controller');
 
-// Public routes (Read access is public)
+// ── IMPORTANT: /places-search MUST be declared before /:id ───────────────────
+// Express matches routes top-to-bottom. If /:id came first, the string
+// "places-search" would be treated as an id and hit getBusinessDetails instead.
+router.get('/places-search', searchFoursquarePlaces);
+
+// Public routes
 router.get('/', getBusinesses);
 router.get('/:id', getBusinessDetails);
 
-// Create business (Requires authentication - Section 2.2)
-// Enforced 'protect' middleware to ensure only logged-in users can create businesses
+// Create business (authenticated)
 router.post('/', uploadKeyOrProtect, createBusiness);
 
 module.exports = router;
