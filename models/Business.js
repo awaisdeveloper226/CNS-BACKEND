@@ -19,22 +19,41 @@ const businessSchema = mongoose.Schema(
             enum: ['Mall', 'Standalone', 'Other'],
             required: true,
         },
-        
-        totalContributions: { // Section 8.1 (Crowdsourcing metric)
+
+        totalContributions: {
             type: Number,
             default: 0,
         },
-        isVerified: { // Section 6.1 (Verification status)
+        isVerified: {
             type: Boolean,
             default: false,
         },
-        tags: [String], // Section 4.1, 8.1
-        
-        // CRITICAL FIX: ADD THIS FIELD TO ENABLE POPULATION
+        tags: [String],
+
+        // ── Foursquare integration ──────────────────────────────────────────
+        // Unique Foursquare place ID. sparse=true means documents without a
+        // placeId (manually created businesses) are excluded from the unique
+        // index so they don't conflict with each other.
+        placeId: {
+            type: String,
+            default: null,
+            sparse: true,
+            unique: true,
+        },
+        // 'manual'     → created directly by a user inside the app
+        // 'foursquare' → auto-created when a Foursquare result is picked and
+        //                the user submits their first instruction
+        source: {
+            type: String,
+            enum: ['manual', 'foursquare'],
+            default: 'manual',
+        },
+        // ───────────────────────────────────────────────────────────────────
+
         contributions: [
             {
                 type: mongoose.Schema.Types.ObjectId,
-                ref: 'Instruction', // Reference the Instruction model
+                ref: 'Instruction',
             },
         ],
     },
