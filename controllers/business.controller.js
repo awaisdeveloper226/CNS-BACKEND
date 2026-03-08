@@ -22,27 +22,38 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   }
 
   if (!FSQ_API_KEY) {
+    console.error("❌ CNS_FOUR_SQUARE_API_KEY is not set in environment");
     return res.status(500).json({ message: "Foursquare API key not configured" });
   }
 
   const url = `${FSQ_SEARCH_URL}?query=${encodeURIComponent(q)}&limit=10&fields=fsq_id,name,location`;
 
+  console.log("🔍 Foursquare request:", url);
+  console.log("🔑 API key prefix:", FSQ_API_KEY.slice(0, 8) + "...");
+
   const response = await fetch(url, {
     headers: {
       Accept: "application/json",
+      // Foursquare Places API v3 — Service API key, no "Bearer" prefix
       Authorization: FSQ_API_KEY,
     },
   });
 
   if (!response.ok) {
-    const err = await response.text();
-    console.error("Foursquare error:", err);
-    return res.status(502).json({ message: "Foursquare search failed" });
+    const errText = await response.text();
+    console.error(`❌ Foursquare ${response.status}:`, errText);
+    // Return the raw error so you can see exactly what Foursquare says
+    return res.status(502).json({
+      message: "Foursquare search failed",
+      fsqStatus: response.status,
+      fsqError: errText,
+    });
   }
 
   const data = await response.json();
+  console.log(`✅ Foursquare returned ${data.results?.length ?? 0} results`);
+
   const results = (data.results || []).map((place) => {
-    // Build a clean address string from Foursquare's location object
     const loc = place.location || {};
     const addressParts = [
       loc.address,
@@ -53,7 +64,6 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     const address = addressParts.join(", ") || "Address not available";
 
     return {
-      // No _id — this is NOT in MongoDB yet
       placeId: place.fsq_id,
       name: place.name,
       address,
@@ -120,7 +130,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     "contributions"
   );
 
-  // Sort by rating
   if (business.contributions && business.contributions.length > 0) {
     business.contributions.sort((a, b) => {
       const scoreA = (a.likes || 0) - (a.dislikes || 0);
@@ -130,7 +139,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     });
   }
 
-  // Fetch comment counts for all contributions in one query
   const instructionIds = business.contributions.map((i) => i._id);
   const commentCounts = await Comment.aggregate([
     { $match: { instruction: { $in: instructionIds } } },
@@ -178,14 +186,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
 
 /**
  * @desc  Create new business
- *        Handles both manual creation AND auto-creation from a Foursquare result.
- *
- *        If a placeId is supplied and a business with that placeId already exists
- *        in MongoDB (because another user submitted instructions for the same
- *        Foursquare place earlier), we return the existing record instead of
- *        throwing a duplicate error. This makes the frontend logic simple:
- *        always POST, always get back a valid MongoDB _id.
- *
  * @route POST /api/businesses
  * @access Private
  */
@@ -198,8 +198,6 @@ const createBusiness = asyncHandler(async (req, res) => {
   }
 
   // ── Foursquare-sourced business ───────────────────────────────────────────
-  // If a placeId is provided, check if it already exists in MongoDB.
-  // If yes — return it immediately (idempotent). No duplicate created.
   if (placeId) {
     const existing = await Business.findOne({ placeId });
     if (existing) {
@@ -218,7 +216,7 @@ const createBusiness = asyncHandler(async (req, res) => {
     return res.status(201).json(business);
   }
 
-  // ── Manual business creation (original flow, unchanged) ──────────────────
+  // ── Manual business creation ──────────────────────────────────────────────
   if (!type || !courierType) {
     res.status(400);
     throw new Error("Name, address, type, and courier type are required");
