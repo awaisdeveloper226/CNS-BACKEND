@@ -5,12 +5,14 @@ const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 
-// ── Foursquare config ─────────────────────────────────────────────────────────
-const FSQ_API_KEY = process.env.CNS_FOUR_SQUARE_API_KEY;
-const FSQ_SEARCH_URL = "https://api.foursquare.com/v3/places/search";
+// ── Nominatim (OpenStreetMap) config ──────────────────────────────────────────
+// Completely free, no API key, no billing required.
+// Policy: must send a descriptive User-Agent and max 1 req/sec.
+const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
+const NOMINATIM_USER_AGENT = "CNS-CourierNavigator/1.0 (courier-navigator-app)";
 
 /**
- * @desc  Search Foursquare for businesses worldwide
+ * @desc  Search OpenStreetMap Nominatim for businesses worldwide
  * @route GET /api/businesses/places-search?q=KFC+Lahore
  * @access Public
  */
@@ -21,58 +23,95 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Query parameter 'q' is required" });
   }
 
-  if (!FSQ_API_KEY) {
-    console.error("❌ CNS_FOUR_SQUARE_API_KEY is not set in environment");
-    return res.status(500).json({ message: "Foursquare API key not configured" });
-  }
+  // Nominatim search — returns POIs, shops, restaurants, etc. worldwide
+  // countrycodes= removed intentionally so it searches globally
+  const params = new URLSearchParams({
+    q: q.trim(),
+    format: "json",
+    limit: "15",
+    addressdetails: "1",
+    // Return only results that have a name (filters out pure address matches)
+    featuretype: "settlement",
+  });
 
-  const url = `${FSQ_SEARCH_URL}?query=${encodeURIComponent(q)}&limit=10&fields=fsq_id,name,location`;
+  // Also do a broader search without featuretype to catch businesses
+  const paramsWide = new URLSearchParams({
+    q: q.trim(),
+    format: "json",
+    limit: "15",
+    addressdetails: "1",
+  });
 
-  console.log("🔍 Foursquare request:", url);
-  console.log("🔑 API key prefix:", FSQ_API_KEY.slice(0, 8) + "...");
+  const url = `${NOMINATIM_URL}?${paramsWide.toString()}`;
+  console.log("🔍 Nominatim request:", url);
 
   const response = await fetch(url, {
     headers: {
-      Accept: "application/json",
-      // Foursquare Places API v3 — Service API key, no "Bearer" prefix
-      Authorization: FSQ_API_KEY,
+      "User-Agent": NOMINATIM_USER_AGENT,
+      "Accept-Language": "en",
     },
   });
 
   if (!response.ok) {
     const errText = await response.text();
-    console.error(`❌ Foursquare ${response.status}:`, errText);
-    // Return the raw error so you can see exactly what Foursquare says
-    return res.status(502).json({
-      message: "Foursquare search failed",
-      fsqStatus: response.status,
-      fsqError: errText,
-    });
+    console.error(`❌ Nominatim error ${response.status}:`, errText);
+    return res.status(502).json({ message: "Place search failed", detail: errText });
   }
 
   const data = await response.json();
-  console.log(`✅ Foursquare returned ${data.results?.length ?? 0} results`);
+  console.log(`✅ Nominatim returned ${data.length} results`);
 
-  const results = (data.results || []).map((place) => {
-    const loc = place.location || {};
-    const addressParts = [
-      loc.address,
-      loc.locality,
-      loc.region,
-      loc.country,
-    ].filter(Boolean);
-    const address = addressParts.join(", ") || "Address not available";
+  // Map Nominatim response to our Business shape
+  const results = data
+    .filter((place) => place.display_name && place.osm_id)
+    .map((place) => {
+      const addr = place.address || {};
 
-    return {
-      placeId: place.fsq_id,
-      name: place.name,
-      address,
-      source: "foursquare",
-      type: "Other",
-      totalContributions: 0,
-      isVerified: false,
-    };
-  });
+      // Build a clean short address: road + suburb/city + country
+      const addressParts = [
+        addr.road || addr.pedestrian || addr.footway,
+        addr.suburb || addr.quarter || addr.neighbourhood,
+        addr.city || addr.town || addr.village || addr.municipality,
+        addr.state,
+        addr.country,
+      ].filter(Boolean);
+
+      // Deduplicate consecutive identical parts
+      const dedupedParts = addressParts.filter(
+        (part, i) => i === 0 || part !== addressParts[i - 1]
+      );
+
+      const address = dedupedParts.join(", ") || place.display_name;
+
+      // Use OSM type + id as a stable unique key
+      const placeId = `osm_${place.osm_type}_${place.osm_id}`;
+
+      // Extract a clean name — Nominatim puts full name in display_name
+      // but the actual POI name is in place.name (if present) or the
+      // first segment of display_name
+      const name =
+        place.name ||
+        place.display_name.split(",")[0].trim();
+
+      return {
+        placeId,
+        name,
+        address,
+        source: "foursquare", // keep field name consistent with rest of codebase
+        type: "Other",
+        totalContributions: 0,
+        isVerified: false,
+      };
+    })
+    // Filter out results where name is just a number or very generic
+    .filter((r) => r.name && r.name.length > 1 && !/^\d+$/.test(r.name))
+    // Deduplicate by name+address combination
+    .filter(
+      (r, i, arr) =>
+        arr.findIndex(
+          (x) => x.name.toLowerCase() === r.name.toLowerCase() && x.address === r.address
+        ) === i
+    );
 
   res.status(200).json(results);
 });
@@ -197,7 +236,7 @@ const createBusiness = asyncHandler(async (req, res) => {
     throw new Error("Name and address are required");
   }
 
-  // ── Foursquare-sourced business ───────────────────────────────────────────
+  // ── OSM/Foursquare-sourced business (placeId present) ────────────────────
   if (placeId) {
     const existing = await Business.findOne({ placeId });
     if (existing) {
