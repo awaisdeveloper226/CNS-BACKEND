@@ -98,7 +98,7 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
         name,
         address,
         source: "foursquare", // keep field name consistent with rest of codebase
-        type: "Other",
+        type: "Standalone",
         totalContributions: 0,
         isVerified: false,
       };
@@ -246,7 +246,7 @@ const createBusiness = asyncHandler(async (req, res) => {
     const business = await Business.create({
       name,
       address,
-      type: type || "Other",
+      type: type || "Standalone",
       source: "foursquare",
       placeId,
       tags: courierType ? [courierType] : [],
