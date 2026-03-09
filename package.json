@@ -8,13 +8,13 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
-    "nodemailer": "^3.1.8",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.22.1",
     "express-async-handler": "^1.2.0",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^8.20.2"
+    "mongoose": "^8.20.2",
+    "nodemailer": "^3.1.8"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"
