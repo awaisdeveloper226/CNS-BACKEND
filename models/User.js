@@ -1,5 +1,4 @@
 // backend/models/User.js
-
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -12,7 +11,6 @@ const UserSchema = new mongoose.Schema(
       minlength: 2,
       maxlength: 50,
     },
-
     email: {
       type: String,
       required: [true, 'Email is required'],
@@ -25,49 +23,26 @@ const UserSchema = new mongoose.Schema(
         'Please use a valid email address',
       ],
     },
-
     password: {
       type: String,
       required: [true, 'Password is required'],
       minlength: 6,
-      select: false, // 🔐 Never return password by default
+      select: false,
     },
+    level:               { type: Number, default: 1 },
+    contributions:       { type: Number, default: 0 },
+    totalLikesReceived:  { type: Number, default: 0 },
+    badges:              { type: [String], default: [] },
 
-    // --- Gamification / Tracking (Section 7.1) ---
-
-    level: {
-      type: Number,
-      default: 1,
-    },
-
-    contributions: {
-      type: Number,
-      default: 0,
-    },
-    
-    // REQUIRED: Tracks total likes received across all their instructions (Section 7.1 - Likes received)
-    totalLikesReceived: {
-        type: Number,
-        default: 0,
-    },
-
-    // REQUIRED: Tracks titles/badges earned by the user (Section 7.2)
-    badges: {
-        type: [String], // Store badge names or IDs (e.g., 'Local Guide', 'Mall Navigator')
-        default: [],
-    },
+    // ── Password reset OTP ──────────────────────────────
+    resetPasswordOTP:       { type: String, default: null, select: false },
+    resetPasswordOTPExpiry: { type: Date,   default: null, select: false },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
-// =====================================================
-// 🔐 Hash password before save
-// =====================================================
 UserSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
-
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
@@ -77,9 +52,6 @@ UserSchema.pre('save', async function (next) {
   }
 });
 
-// =====================================================
-// 🔍 Compare password
-// =====================================================
 UserSchema.methods.matchPassword = async function (enteredPassword) {
   return bcrypt.compare(enteredPassword, this.password);
 };
