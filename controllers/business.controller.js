@@ -5,14 +5,12 @@ const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 
-// ── Nominatim (OpenStreetMap) config ──────────────────────────────────────────
-// Completely free, no API key, no billing required.
-// Policy: must send a descriptive User-Agent and max 1 req/sec.
-const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
-const NOMINATIM_USER_AGENT = "CNS-CourierNavigator/1.0 (courier-navigator-app)";
+// ── Google Places API config ──────────────────────────────────────────────────
+const GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json";
+const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
 /**
- * @desc  Search OpenStreetMap Nominatim for businesses worldwide
+ * @desc  Search Google Places for businesses worldwide
  * @route GET /api/businesses/places-search?q=KFC+Lahore
  * @access Public
  */
@@ -23,95 +21,45 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Query parameter 'q' is required" });
   }
 
-  // Nominatim search — returns POIs, shops, restaurants, etc. worldwide
-  // countrycodes= removed intentionally so it searches globally
+  if (!GOOGLE_API_KEY) {
+    console.error("❌ GOOGLE_PLACES_API_KEY is not set in environment variables");
+    return res.status(500).json({ message: "Places search is not configured" });
+  }
+
   const params = new URLSearchParams({
-    q: q.trim(),
-    format: "json",
-    limit: "15",
-    addressdetails: "1",
-    // Return only results that have a name (filters out pure address matches)
-    featuretype: "settlement",
+    query: q.trim(),
+    key: GOOGLE_API_KEY,
   });
 
-  // Also do a broader search without featuretype to catch businesses
-  const paramsWide = new URLSearchParams({
-    q: q.trim(),
-    format: "json",
-    limit: "15",
-    addressdetails: "1",
-  });
+  const url = `${GOOGLE_PLACES_URL}?${params.toString()}`;
+  console.log("🔍 Google Places request for query:", q.trim());
 
-  const url = `${NOMINATIM_URL}?${paramsWide.toString()}`;
-  console.log("🔍 Nominatim request:", url);
-
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": NOMINATIM_USER_AGENT,
-      "Accept-Language": "en",
-    },
-  });
+  const response = await fetch(url);
 
   if (!response.ok) {
     const errText = await response.text();
-    console.error(`❌ Nominatim error ${response.status}:`, errText);
+    console.error(`❌ Google Places error ${response.status}:`, errText);
     return res.status(502).json({ message: "Place search failed", detail: errText });
   }
 
   const data = await response.json();
-  console.log(`✅ Nominatim returned ${data.length} results`);
 
-  // Map Nominatim response to our Business shape
-  const results = data
-    .filter((place) => place.display_name && place.osm_id)
-    .map((place) => {
-      const addr = place.address || {};
+  if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+    console.error("❌ Google Places API error status:", data.status, data.error_message);
+    return res.status(502).json({ message: "Place search failed", detail: data.error_message });
+  }
 
-      // Build a clean short address: road + suburb/city + country
-      const addressParts = [
-        addr.road || addr.pedestrian || addr.footway,
-        addr.suburb || addr.quarter || addr.neighbourhood,
-        addr.city || addr.town || addr.village || addr.municipality,
-        addr.state,
-        addr.country,
-      ].filter(Boolean);
+  console.log(`✅ Google Places returned ${(data.results || []).length} results`);
 
-      // Deduplicate consecutive identical parts
-      const dedupedParts = addressParts.filter(
-        (part, i) => i === 0 || part !== addressParts[i - 1]
-      );
-
-      const address = dedupedParts.join(", ") || place.display_name;
-
-      // Use OSM type + id as a stable unique key
-      const placeId = `osm_${place.osm_type}_${place.osm_id}`;
-
-      // Extract a clean name — Nominatim puts full name in display_name
-      // but the actual POI name is in place.name (if present) or the
-      // first segment of display_name
-      const name =
-        place.name ||
-        place.display_name.split(",")[0].trim();
-
-      return {
-        placeId,
-        name,
-        address,
-        source: "foursquare", // keep field name consistent with rest of codebase
-        type: "Standalone",
-        totalContributions: 0,
-        isVerified: false,
-      };
-    })
-    // Filter out results where name is just a number or very generic
-    .filter((r) => r.name && r.name.length > 1 && !/^\d+$/.test(r.name))
-    // Deduplicate by name+address combination
-    .filter(
-      (r, i, arr) =>
-        arr.findIndex(
-          (x) => x.name.toLowerCase() === r.name.toLowerCase() && x.address === r.address
-        ) === i
-    );
+  const results = (data.results || []).map((place) => ({
+    placeId: place.place_id,
+    name: place.name,
+    address: place.formatted_address,
+    source: "foursquare", // keep field name consistent with rest of codebase
+    type: "Standalone",
+    totalContributions: 0,
+    isVerified: false,
+  }));
 
   res.status(200).json(results);
 });
@@ -236,7 +184,7 @@ const createBusiness = asyncHandler(async (req, res) => {
     throw new Error("Name and address are required");
   }
 
-  // ── OSM/Foursquare-sourced business (placeId present) ────────────────────
+  // ── Google Places-sourced business (placeId present) ─────────────────────
   if (placeId) {
     const existing = await Business.findOne({ placeId });
     if (existing) {
