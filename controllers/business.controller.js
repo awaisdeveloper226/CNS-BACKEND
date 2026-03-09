@@ -5,12 +5,12 @@ const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 
-// ── Google Places API config ──────────────────────────────────────────────────
-const GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json";
+// ── Google Places API (New) config ────────────────────────────────────────────
+const GOOGLE_PLACES_URL = "https://places.googleapis.com/v1/places:searchText";
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
 /**
- * @desc  Search Google Places for businesses worldwide
+ * @desc  Search Google Places (New) for businesses worldwide
  * @route GET /api/businesses/places-search?q=KFC+Lahore
  * @access Public
  */
@@ -26,15 +26,17 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     return res.status(500).json({ message: "Places search is not configured" });
   }
 
-  const params = new URLSearchParams({
-    query: q.trim(),
-    key: GOOGLE_API_KEY,
+  console.log("🔍 Google Places (New) request for query:", q.trim());
+
+  const response = await fetch(GOOGLE_PLACES_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": GOOGLE_API_KEY,
+      "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress",
+    },
+    body: JSON.stringify({ textQuery: q.trim() }),
   });
-
-  const url = `${GOOGLE_PLACES_URL}?${params.toString()}`;
-  console.log("🔍 Google Places request for query:", q.trim());
-
-  const response = await fetch(url);
 
   if (!response.ok) {
     const errText = await response.text();
@@ -43,18 +45,12 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   }
 
   const data = await response.json();
+  console.log(`✅ Google Places returned ${(data.places || []).length} results`);
 
-  if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
-    console.error("❌ Google Places API error status:", data.status, data.error_message);
-    return res.status(502).json({ message: "Place search failed", detail: data.error_message });
-  }
-
-  console.log(`✅ Google Places returned ${(data.results || []).length} results`);
-
-  const results = (data.results || []).map((place) => ({
-    placeId: place.place_id,
-    name: place.name,
-    address: place.formatted_address,
+  const results = (data.places || []).map((place) => ({
+    placeId: place.id,
+    name: place.displayName?.text || "",
+    address: place.formattedAddress || "",
     source: "foursquare", // keep field name consistent with rest of codebase
     type: "Standalone",
     totalContributions: 0,
