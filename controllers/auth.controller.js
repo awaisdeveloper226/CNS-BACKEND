@@ -107,6 +107,7 @@ const forgotPassword = asyncHandler(async (req, res) => {
     res.status(200).json({ message: 'OTP sent to your email' });
   } catch (err) {
     console.error('❌ Email send failed:', err.message);
+    console.error("❌ Full error:", err); // add this line
     // Clear OTP if email fails so user can try again
     user.resetPasswordOTP = null;
     user.resetPasswordOTPExpiry = null;
