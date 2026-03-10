@@ -51,7 +51,7 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     placeId: place.id,
     name: place.displayName?.text || "",
     address: place.formattedAddress || "",
-    source: "foursquare",
+    source: "foursquare", // keep field name consistent with rest of codebase
     type: "Standalone",
     totalContributions: 0,
     isVerified: false,
@@ -168,7 +168,7 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc  Create new business (or return existing one — fully idempotent)
+ * @desc  Create new business
  * @route POST /api/businesses
  * @access Private
  */
@@ -180,33 +180,23 @@ const createBusiness = asyncHandler(async (req, res) => {
     throw new Error("Name and address are required");
   }
 
-  // ── Foursquare / Google Places business ──────────────────────────────────
+  // ── Google Places-sourced business (placeId present) ─────────────────────
   if (placeId) {
-    // ✅ Atomic upsert — if two requests race, only one will insert;
-    //    the other will get the existing document. No duplicate key errors.
-    const business = await Business.findOneAndUpdate(
-      { placeId },                          // filter
-      {                                     // update (only applied on insert)
-        $setOnInsert: {
-          name,
-          address,
-          type: type || "Standalone",
-          source: "foursquare",
-          placeId,
-          tags: courierType ? [courierType] : [],
-          totalContributions: 0,
-          isVerified: false,
-        },
-      },
-      {
-        upsert: true,
-        new: true,          // return the document (new or existing)
-        setDefaultsOnInsert: true,
-      }
-    );
+    const existing = await Business.findOne({ placeId });
+    if (existing) {
+      return res.status(200).json(existing);
+    }
 
-    console.log(`✅ Foursquare business upserted: ${business._id} (${business.name})`);
-    return res.status(200).json(business);
+    const business = await Business.create({
+      name,
+      address,
+      type: type || "Standalone",
+      source: "foursquare",
+      placeId,
+      tags: courierType ? [courierType] : [],
+    });
+
+    return res.status(201).json(business);
   }
 
   // ── Manual business creation ──────────────────────────────────────────────
@@ -228,32 +218,21 @@ const createBusiness = asyncHandler(async (req, res) => {
     );
   }
 
-  // ✅ Same atomic upsert for manual businesses — match on name + address
-  const business = await Business.findOneAndUpdate(
-    { name, address },
-    {
-      $setOnInsert: {
-        name,
-        address,
-        type,
-        source: "manual",
-        tags: [courierType],
-        totalContributions: 0,
-        isVerified: false,
-      },
-    },
-    {
-      upsert: true,
-      new: true,
-      setDefaultsOnInsert: true,
-    }
-  );
+  const existing = await Business.findOne({ name, address });
+  if (existing) {
+    res.status(400);
+    throw new Error("Business with this name and address already exists");
+  }
 
-  const wasCreated = !business.createdAt || 
-    (Date.now() - new Date(business.createdAt).getTime()) < 5000;
+  const business = await Business.create({
+    name,
+    address,
+    type,
+    source: "manual",
+    tags: [courierType],
+  });
 
-  console.log(`✅ Manual business upserted: ${business._id} (${business.name})`);
-  return res.status(201).json(business);
+  res.status(201).json(business);
 });
 
 module.exports = {
