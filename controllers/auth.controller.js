@@ -7,6 +7,7 @@ const User = require('../models/User');
 const { sendOTPEmail } = require('../utils/emailService');
 
 // 🔐 Generate JWT
+// 🔐 Generate JWT
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
 
