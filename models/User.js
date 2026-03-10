@@ -37,6 +37,10 @@ const UserSchema = new mongoose.Schema(
     // ── Password reset OTP ──────────────────────────────
     resetPasswordOTP:       { type: String, default: null, select: false },
     resetPasswordOTPExpiry: { type: Date,   default: null, select: false },
+
+    // ── OTP rate limiting ───────────────────────────────
+    otpRequestCount:        { type: Number, default: 0,    select: false },
+    otpWindowStart:         { type: Date,   default: null, select: false },
   },
   { timestamps: true }
 );
