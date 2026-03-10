@@ -9,6 +9,9 @@ const { sendOTPEmail } = require('../utils/emailService');
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
 
+const OTP_LIMIT        = 3;           // max requests per window
+const OTP_WINDOW_MS    = 60 * 60 * 1000; // 1 hour in ms
+
 // =====================================================
 // @desc    Register new user
 // @route   POST /api/auth/register
@@ -86,29 +89,52 @@ const forgotPassword = asyncHandler(async (req, res) => {
   }
 
   const user = await User.findOne({ email: email.toLowerCase().trim() })
-    .select('+resetPasswordOTP +resetPasswordOTPExpiry');
+    .select('+resetPasswordOTP +resetPasswordOTPExpiry +otpRequestCount +otpWindowStart');
 
-  // ✅ Return 404 so the frontend knows the email isn't registered
   if (!user) {
     res.status(404);
     throw new Error('No account found with this email address');
   }
 
+  // ── Rate limit check ──────────────────────────────────────────────────────
+  const now = Date.now();
+  const windowStart = user.otpWindowStart ? user.otpWindowStart.getTime() : 0;
+  const windowExpiry = windowStart + OTP_WINDOW_MS;
+  const inWindow = now < windowExpiry;
+
+  if (inWindow && user.otpRequestCount >= OTP_LIMIT) {
+    // Tell the user exactly how many minutes are left
+    const minutesLeft = Math.ceil((windowExpiry - now) / 60000);
+    res.status(429);
+    throw new Error(
+      `Too many code requests. Please try again in ${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}.`
+    );
+  }
+
+  // Reset window if it has expired, otherwise increment
+  if (!inWindow) {
+    user.otpWindowStart  = new Date(now);
+    user.otpRequestCount = 1;
+  } else {
+    user.otpRequestCount += 1;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   // Generate 6-digit OTP
   const otp = crypto.randomInt(100000, 999999).toString();
-
-  user.resetPasswordOTP = otp;
-  user.resetPasswordOTPExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+  user.resetPasswordOTP       = otp;
+  user.resetPasswordOTPExpiry = new Date(now + 10 * 60 * 1000); // 10 min
   await user.save();
 
   try {
     await sendOTPEmail(user.email, otp, user.name);
-    console.log(`✅ OTP sent to ${user.email}`);
+    console.log(`✅ OTP sent to ${user.email} (${user.otpRequestCount}/${OTP_LIMIT} this hour)`);
     res.status(200).json({ message: 'OTP sent to your email' });
   } catch (err) {
     console.error('❌ Email send failed:', err.message);
-    // Clear OTP if email fails so user can try again
-    user.resetPasswordOTP = null;
+    // Roll back count so a send failure doesn't eat one of their attempts
+    user.otpRequestCount = Math.max(0, user.otpRequestCount - 1);
+    user.resetPasswordOTP       = null;
     user.resetPasswordOTPExpiry = null;
     await user.save();
     res.status(500);
@@ -143,7 +169,7 @@ const resetPassword = asyncHandler(async (req, res) => {
   }
 
   if (new Date() > user.resetPasswordOTPExpiry) {
-    user.resetPasswordOTP = null;
+    user.resetPasswordOTP       = null;
     user.resetPasswordOTPExpiry = null;
     await user.save();
     res.status(400);
@@ -155,16 +181,19 @@ const resetPassword = asyncHandler(async (req, res) => {
     throw new Error('Invalid OTP. Please check the code and try again.');
   }
 
-  // ✅ Reject if new password is the same as the current one
+  // Reject if new password is the same as the current one
   const isSamePassword = await user.matchPassword(newPassword);
   if (isSamePassword) {
     res.status(400);
     throw new Error('New password must be different from your current password.');
   }
 
-  user.password = newPassword;
-  user.resetPasswordOTP = null;
+  user.password               = newPassword;
+  user.resetPasswordOTP       = null;
   user.resetPasswordOTPExpiry = null;
+  // ✅ Clear rate limit on successful reset so they start fresh next time
+  user.otpRequestCount = 0;
+  user.otpWindowStart  = null;
   await user.save();
 
   console.log(`✅ Password reset for ${user.email}`);
