@@ -27,6 +27,8 @@ const sendOTPEmail = async (toEmail, otp, userName) => {
     return true;
   } catch (error) {
     console.error("❌ Email failed:", error.response?.data || error.message);
+    console.error("Status:", error.response?.status);
+    console.error("Headers:", error.response?.headers);
     throw error;
   }
 };
