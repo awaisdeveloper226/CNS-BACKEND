@@ -8,7 +8,7 @@ const courier = new Courier({
 
 const sendOTPEmail = async (toEmail, otp, userName) => {
   try {
-    const { requestId } = await courier.send({
+    const { requestId } = await courier.sendMessage({
       message: {
         to: {
           email: toEmail,
