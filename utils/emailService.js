@@ -8,21 +8,18 @@ const courier = new Courier({
 
 const sendOTPEmail = async (toEmail, otp, userName) => {
   try {
-    const { requestId } = await courier.sendMessage({
-      message: {
-        to: {
-          email: toEmail,
-        },
-        content: {
-          title: "Your CNS Password Reset Code",
-          body: `Hi ${userName || "there"}, your password reset code is ${otp}. It expires in 10 minutes. If you did not request this, ignore this email.`,
-        },
+    const { requestId } = await courier.send({
+      to: {
+        email: toEmail,
+      },
+      content: {
+        title: "Your CNS Password Reset Code",
+        body: `Hi ${userName || "there"}, your password reset code is ${otp}. It expires in 10 minutes. If you did not request this, ignore this email.`,
       },
     });
 
     console.log("✅ Email sent:", requestId);
     return true;
-
   } catch (error) {
     console.error("❌ Email failed:", error);
     throw error;
