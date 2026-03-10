@@ -1,13 +1,13 @@
 // utils/emailService.js
-const { Courier } = require('@trycourier/courier');
+const { CourierClient } = require('@trycourier/courier');
 
-const courier = new Courier({
+const courier = new CourierClient({
   authorizationToken: process.env.COURIER_API_KEY
 });
 
 const sendOTPEmail = async (toEmail, otp, userName) => {
   try {
-    const { requestId } = await courier.send({
+    const { requestId } = await courier.sendMessage({
       message: {
         to: { email: toEmail },
         content: {
