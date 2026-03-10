@@ -90,11 +90,11 @@ const forgotPassword = asyncHandler(async (req, res) => {
   const user = await User.findOne({ email: email.toLowerCase().trim() })
     .select('+resetPasswordOTP +resetPasswordOTPExpiry');
 
-  // Always respond the same way — prevents email enumeration attacks
-  if (!user) {
-    return res.status(200).json({ message: 'If that email exists, an OTP has been sent' });
-  }
-
+  // NEW — real 404, frontend shows error and stays on forgot screen
+if (!user) {
+  res.status(404);
+  throw new Error('No account found with this email address');
+}
   // Generate 6-digit OTP
   const otp = crypto.randomInt(100000, 999999).toString();
 
