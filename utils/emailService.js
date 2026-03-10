@@ -1,8 +1,8 @@
 // utils/emailService.js
-const { CourierClient } = require('@trycourier/courier');
+const { CourierClient } = require("@trycourier/courier");
 
-const courier = new CourierClient({
-  authorizationToken: process.env.COURIER_API_KEY
+const courier = CourierClient({
+  authorizationToken: process.env.COURIER_API_KEY,
 });
 
 const sendOTPEmail = async (toEmail, otp, userName) => {
@@ -11,19 +11,19 @@ const sendOTPEmail = async (toEmail, otp, userName) => {
       message: {
         to: { email: toEmail },
         content: {
-          title: 'Your CNS Password Reset Code',
-          body: `Hi ${userName || 'there'}, your password reset code is: ${otp}. Expires in 10 minutes. If you didn't request this, ignore this email.`,
+          title: "Your CNS Password Reset Code",
+          body: `Hi ${userName || "there"}, your password reset code is: ${otp}. Expires in 10 minutes. If you did not request this, ignore this email.`,
         },
         routing: {
-          method: 'single',
-          channels: ['email'],
+          method: "single",
+          channels: ["email"],
         },
       },
     });
-    console.log('✅ Email sent:', requestId);
+    console.log("✅ Email sent:", requestId);
     return true;
   } catch (error) {
-    console.error('❌ Email failed:', error);
+    console.error("❌ Email failed:", error);
     throw error;
   }
 };
