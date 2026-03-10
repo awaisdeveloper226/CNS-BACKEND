@@ -6,8 +6,6 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { sendOTPEmail } = require('../utils/emailService');
 
-// 🔐 Generate JWT
-// 🔐 Generate JWT
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
 
@@ -90,11 +88,12 @@ const forgotPassword = asyncHandler(async (req, res) => {
   const user = await User.findOne({ email: email.toLowerCase().trim() })
     .select('+resetPasswordOTP +resetPasswordOTPExpiry');
 
-  // NEW — real 404, frontend shows error and stays on forgot screen
-if (!user) {
-  res.status(404);
-  throw new Error('No account found with this email address');
-}
+  // ✅ Return 404 so the frontend knows the email isn't registered
+  if (!user) {
+    res.status(404);
+    throw new Error('No account found with this email address');
+  }
+
   // Generate 6-digit OTP
   const otp = crypto.randomInt(100000, 999999).toString();
 
@@ -108,7 +107,6 @@ if (!user) {
     res.status(200).json({ message: 'OTP sent to your email' });
   } catch (err) {
     console.error('❌ Email send failed:', err.message);
-    console.error("❌ Full error:", err); // add this line
     // Clear OTP if email fails so user can try again
     user.resetPasswordOTP = null;
     user.resetPasswordOTPExpiry = null;
@@ -157,7 +155,13 @@ const resetPassword = asyncHandler(async (req, res) => {
     throw new Error('Invalid OTP. Please check the code and try again.');
   }
 
-  // Update password — pre-save hook will hash it
+  // ✅ Reject if new password is the same as the current one
+  const isSamePassword = await user.matchPassword(newPassword);
+  if (isSamePassword) {
+    res.status(400);
+    throw new Error('New password must be different from your current password.');
+  }
+
   user.password = newPassword;
   user.resetPasswordOTP = null;
   user.resetPasswordOTPExpiry = null;
