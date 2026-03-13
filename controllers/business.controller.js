@@ -187,16 +187,25 @@ const createBusiness = asyncHandler(async (req, res) => {
       return res.status(200).json(existing);
     }
 
-    const business = await Business.create({
-      name,
-      address,
-      type: type || "Standalone",
-      source: "foursquare",
-      placeId,
-      tags: courierType ? [courierType] : [],
-    });
-
-    return res.status(201).json(business);
+    try {
+      const business = await Business.create({
+        name,
+        address,
+        type: type || "Standalone",
+        source: "foursquare",
+        placeId,
+        tags: courierType ? [courierType] : [],
+      });
+      return res.status(201).json(business);
+    } catch (err) {
+      if (err.code === 11000) {
+        // Race condition: another request created this placeId just after our
+        // findOne check — find and return the existing record instead of failing
+        const race = await Business.findOne({ placeId });
+        if (race) return res.status(200).json(race);
+      }
+      throw err;
+    }
   }
 
   // ── Manual business creation ──────────────────────────────────────────────
@@ -220,19 +229,36 @@ const createBusiness = asyncHandler(async (req, res) => {
 
   const existing = await Business.findOne({ name, address });
   if (existing) {
-    res.status(400);
-    throw new Error("Business with this name and address already exists");
+    // Return the existing business instead of erroring — the app can continue
+    // with it rather than showing a failure message to the user
+    return res.status(200).json(existing);
   }
 
-  const business = await Business.create({
-    name,
-    address,
-    type,
-    source: "manual",
-    tags: [courierType],
-  });
+  try {
+    const business = await Business.create({
+      name,
+      address,
+      type,
+      source: "manual",
+      tags: [courierType],
+      // ⚠️  Do NOT set placeId here at all — omitting the field entirely
+      // (rather than setting it to null) is what makes the sparse unique
+      // index ignore these documents and prevents the duplicate key error
+    });
+    return res.status(201).json(business);
+  } catch (err) {
+    if (err.code === 11000) {
+      // Race condition between our findOne check and the create call —
+      // find and return the record that won the race
+      const race = await Business.findOne({ name, address });
+      if (race) return res.status(200).json(race);
 
-  res.status(201).json(business);
+      // Shouldn't reach here, but surface a clean error if it does
+      res.status(400);
+      throw new Error("A business with this name and address already exists.");
+    }
+    throw err;
+  }
 });
 
 module.exports = {
