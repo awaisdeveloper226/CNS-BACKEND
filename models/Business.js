@@ -36,7 +36,6 @@ const businessSchema = mongoose.Schema(
         // index so they don't conflict with each other.
         placeId: {
             type: String,
-            default: null,
             sparse: true,
             unique: true,
         },
