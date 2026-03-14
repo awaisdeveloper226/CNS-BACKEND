@@ -1,22 +1,22 @@
 // routes/business.route.js
-
 const express = require('express');
 const router = express.Router();
-
 const { protect } = require('../middleware/auth.middleware');
 const { uploadKeyOrProtect } = require('../middleware/uploadKey.middleware');
-
 const {
   searchFoursquarePlaces,
+  reverseGeocode,
   getBusinesses,
   getBusinessDetails,
   createBusiness,
 } = require('../controllers/business.controller');
 
-// ── IMPORTANT: /places-search MUST be declared before /:id ───────────────────
-// Express matches routes top-to-bottom. If /:id came first, the string
-// "places-search" would be treated as an id and hit getBusinessDetails instead.
+// ── IMPORTANT: specific GET routes MUST be declared before /:id ──────────────
+// Express matches routes top-to-bottom. If /:id came first, the strings
+// "places-search" and "geocode" would be treated as ids and hit getBusinessDetails.
+
 router.get('/places-search', searchFoursquarePlaces);
+router.get('/geocode', reverseGeocode);
 
 // Public routes
 router.get('/', getBusinesses);
