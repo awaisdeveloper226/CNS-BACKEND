@@ -8,6 +8,7 @@ const Comment = require("../models/Comment");
 // ── Google Places API (New) config ────────────────────────────────────────────
 const GOOGLE_PLACES_URL = "https://places.googleapis.com/v1/places:searchText";
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
+const GOOGLE_GEOCODING_KEY = process.env.GOOGLE_GEOCODING_KEY;
 
 /**
  * @desc  Search Google Places (New) for businesses worldwide
@@ -83,8 +84,8 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 
   // Run geocoding AND nearby places search in parallel
   const [geocodeRes, nearbyRes] = await Promise.all([
-    fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`),
-    fetch(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&rankby=distance&type=establishment&key=${GOOGLE_API_KEY}`),
+    fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_GEOCODING_KEY}`),
+    fetch(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&rankby=distance&type=establishment&key=${GOOGLE_GEOCODING_KEY}`),
   ]);
 
   const [geocodeData, nearbyData] = await Promise.all([
