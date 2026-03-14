@@ -8,7 +8,6 @@ const Comment = require("../models/Comment");
 // ── Google Places API (New) config ────────────────────────────────────────────
 const GOOGLE_PLACES_URL = "https://places.googleapis.com/v1/places:searchText";
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
-const GOOGLE_GEOCODING_KEY = process.env.GOOGLE_GEOCODING_KEY;
 
 /**
  * @desc  Search Google Places (New) for businesses worldwide
@@ -86,7 +85,7 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 
   // ── 1. Reverse geocode via new Geocoding API (v1) ──────────────────────
   const geocodeRes = await fetch(
-    `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_GEOCODING_KEY}`
+    `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`
   );
   const geocodeData = await geocodeRes.json();
   console.log("[Geocode] status:", geocodeData.status);
@@ -96,7 +95,7 @@ const reverseGeocode = asyncHandler(async (req, res) => {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Goog-Api-Key": GOOGLE_GEOCODING_KEY,
+      "X-Goog-Api-Key": GOOGLE_API_KEY,
       "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
     },
     body: JSON.stringify({
