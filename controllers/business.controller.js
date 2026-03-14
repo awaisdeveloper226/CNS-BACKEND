@@ -82,29 +82,45 @@ const reverseGeocode = asyncHandler(async (req, res) => {
     return res.status(500).json({ message: "Geocoding is not configured" });
   }
 
-  // Run geocoding AND nearby places search in parallel
-  const [geocodeRes, nearbyRes] = await Promise.all([
-    fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_GEOCODING_KEY}`),
-    fetch(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&rankby=distance&type=establishment&key=${GOOGLE_GEOCODING_KEY}`),
-  ]);
+  console.log(`[Geocode] Fetching for lat=${lat}, lng=${lng}`);
 
-  const [geocodeData, nearbyData] = await Promise.all([
-    geocodeRes.json(),
-    nearbyRes.json(),
-  ]);
+  // ── 1. Reverse geocode via new Geocoding API (v1) ──────────────────────
+  const geocodeRes = await fetch(
+    `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_GEOCODING_KEY}`
+  );
+  const geocodeData = await geocodeRes.json();
+  console.log("[Geocode] status:", geocodeData.status);
 
-  // Pick the nearest named establishment if one exists within ~100m
-  let nearbyName = null;
-  if (nearbyData.status === "OK" && nearbyData.results?.length) {
-    nearbyName = nearbyData.results[0].name; // already sorted by distance
-  }
+  // ── 2. Nearby search via new Places API (v1) ───────────────────────────
+  const nearbyRes = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": GOOGLE_GEOCODING_KEY,
+      "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
+    },
+    body: JSON.stringify({
+      locationRestriction: {
+        circle: {
+          center: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
+          radius: 100.0, // 100 metres
+        },
+      },
+      maxResultCount: 1,
+    }),
+  });
+  const nearbyData = await nearbyRes.json();
+  console.log("[Nearby] response:", JSON.stringify(nearbyData));
 
-  // Forward both to frontend so it can pick the best name
+  const nearbyName = nearbyData.places?.[0]?.displayName?.text ?? null;
+  console.log("[Nearby] nearbyName:", nearbyName);
+
   res.status(200).json({
     ...geocodeData,
-    nearbyName, // null if nothing found nearby
+    nearbyName,
   });
 });
+
 
 /**
  * @desc  Get all businesses (including search for frontend)
