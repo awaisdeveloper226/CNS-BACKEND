@@ -81,13 +81,28 @@ const reverseGeocode = asyncHandler(async (req, res) => {
     return res.status(500).json({ message: "Geocoding is not configured" });
   }
 
-  const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`;
+  // Run geocoding AND nearby places search in parallel
+  const [geocodeRes, nearbyRes] = await Promise.all([
+    fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`),
+    fetch(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&rankby=distance&type=establishment&key=${GOOGLE_API_KEY}`),
+  ]);
 
-  const response = await fetch(url);
-  const data = await response.json();
+  const [geocodeData, nearbyData] = await Promise.all([
+    geocodeRes.json(),
+    nearbyRes.json(),
+  ]);
 
-  // Forward the full Google response — the frontend parses it
-  res.status(200).json(data);
+  // Pick the nearest named establishment if one exists within ~100m
+  let nearbyName = null;
+  if (nearbyData.status === "OK" && nearbyData.results?.length) {
+    nearbyName = nearbyData.results[0].name; // already sorted by distance
+  }
+
+  // Forward both to frontend so it can pick the best name
+  res.status(200).json({
+    ...geocodeData,
+    nearbyName, // null if nothing found nearby
+  });
 });
 
 /**
