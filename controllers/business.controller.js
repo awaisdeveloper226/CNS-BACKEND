@@ -61,6 +61,36 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
 });
 
 /**
+ * @desc  Reverse geocode lat/lng → address via Google Geocoding API
+ * @route GET /api/businesses/geocode?lat=X&lng=Y
+ * @access Public
+ *
+ * Why this exists as a backend proxy:
+ * The Google Geocoding API blocks requests from WebViews because they send
+ * no HTTP referrer header. Calling it from the backend (server-to-server)
+ * has no referrer restriction so it always succeeds.
+ */
+const reverseGeocode = asyncHandler(async (req, res) => {
+  const { lat, lng } = req.query;
+
+  if (!lat || !lng) {
+    return res.status(400).json({ message: "lat and lng query params are required" });
+  }
+
+  if (!GOOGLE_API_KEY) {
+    return res.status(500).json({ message: "Geocoding is not configured" });
+  }
+
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`;
+
+  const response = await fetch(url);
+  const data = await response.json();
+
+  // Forward the full Google response — the frontend parses it
+  res.status(200).json(data);
+});
+
+/**
  * @desc  Get all businesses (including search for frontend)
  * @route GET /api/businesses
  * @access Public
@@ -263,6 +293,7 @@ const createBusiness = asyncHandler(async (req, res) => {
 
 module.exports = {
   searchFoursquarePlaces,
+  reverseGeocode,
   getBusinesses,
   getBusinessDetails,
   createBusiness,
