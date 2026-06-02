@@ -11,7 +11,7 @@ const FOURSQUARE_API_KEY = process.env.FOURSQUARE_API_KEY;
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
 /**
- * @desc  Search Foursquare Places (v2 Legacy) for businesses worldwide
+ * @desc  Search Foursquare Places (UPDATED → v3 API FIX)
  * @route GET /api/businesses/places-search?q=KFC+Lahore
  * @access Public
  */
@@ -27,30 +27,44 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     return res.status(500).json({ message: "Places search is not configured" });
   }
 
-  console.log("🔍 Foursquare v2 Places request for query:", q.trim());
+  console.log("🔍 Foursquare v3 Places request for query:", q.trim());
 
   try {
-    // Target the robust v2 venues endpoint utilizing your authentic token parameter
-    const url = `https://api.foursquare.com/v2/venues/search?v=20240101&intent=browse&near=Pakistan&query=${encodeURIComponent(q.trim())}&oauth_token=${FOURSQUARE_API_KEY}&limit=20`;
+    // ✅ FIXED: Foursquare v3 endpoint (matches your API key type)
+    const url = `https://api.foursquare.com/v3/places/search?query=${encodeURIComponent(
+      q.trim()
+    )}&limit=20`;
 
-    const response = await fetch(url, { method: "GET" });
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: FOURSQUARE_API_KEY,
+        Accept: "application/json",
+      },
+    });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`❌ Foursquare v2 Places error ${response.status}:`, errText);
+      console.error(`❌ Foursquare v3 error ${response.status}:`, errText);
       return res.status(502).json({ message: "Place search failed", detail: errText });
     }
 
     const data = await response.json();
-    const venues = data.response?.venues || [];
-    console.log(`✅ Foursquare v2 returned ${venues.length} results`);
 
-    // Flatten venue results explicitly to match the frontend scoring schema structural requirements
-    const results = venues.map((venue) => ({
-      placeId: venue.id,
-      name: venue.name || "",
-      address: venue.location?.formattedAddress?.join(", ") || venue.location?.address || "Address not specified",
-      source: "foursquare", 
+    // v3 response format: data.results
+    const places = data.results || [];
+
+    console.log(`✅ Foursquare v3 returned ${places.length} results`);
+
+    // Flatten response for your frontend
+    const results = places.map((place) => ({
+      placeId: place.fsq_id,
+      name: place.name || "",
+      address:
+        place.location?.formatted_address ||
+        place.location?.address ||
+        "Address not specified",
+      source: "foursquare",
       type: "Standalone",
       totalContributions: 0,
       isVerified: false,
@@ -179,6 +193,7 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     { $match: { instruction: { $in: instructionIds } } },
     { $group: { _id: "$instruction", count: { $sum: 1 } } },
   ]);
+
   const commentCountMap = {};
   commentCounts.forEach((c) => {
     commentCountMap[c._id.toString()] = c.count;
