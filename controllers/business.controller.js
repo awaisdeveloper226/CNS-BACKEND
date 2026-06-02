@@ -5,15 +5,15 @@ const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 
-// ── Foursquare Legacy/v2 API Config ──────────────────────────────────────────
-const FOURSQUARE_API_KEY = process.env.FOURSQUARE_API_KEY;
-// Google key reserved strictly for backend-to-server geocoding proxy actions
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
 /**
- * @desc  Search Foursquare Places (UPDATED → v3 API FIX)
+ * @desc  Search places via Nominatim (OpenStreetMap) — free, no API key required
  * @route GET /api/businesses/places-search?q=KFC+Lahore
  * @access Public
+ *
+ * Nominatim ToS: include a descriptive User-Agent, max 1 req/sec.
+ * For higher traffic, self-host: https://nominatim.org/release-docs/develop/admin/Installation/
  */
 const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   const { q } = req.query;
@@ -22,58 +22,97 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Query parameter 'q' is required" });
   }
 
-  if (!FOURSQUARE_API_KEY) {
-    console.error("❌ FOURSQUARE_API_KEY is not set in environment variables");
-    return res.status(500).json({ message: "Places search is not configured" });
-  }
-
-  console.log("🔍 Foursquare v3 Places request for query:", q.trim());
+  const query = q.trim();
+  console.log("🔍 Nominatim places search for query:", query);
 
   try {
-    // ✅ FIXED: Foursquare v3 endpoint (matches your API key type)
-    const url = `https://api.foursquare.com/v3/places/search?query=${encodeURIComponent(
-      q.trim()
-    )}&limit=20`;
+    // Nominatim free geocoding/search — no API key needed
+    // addressdetails=1 gives us structured address components
+    // limit=20 is the max Nominatim allows per request
+    const url =
+      `https://nominatim.openstreetmap.org/search` +
+      `?q=${encodeURIComponent(query)}` +
+      `&format=json` +
+      `&addressdetails=1` +
+      `&limit=20` +
+      `&dedupe=1`;
 
     const response = await fetch(url, {
-      method: "GET",
       headers: {
-        Authorization: FOURSQUARE_API_KEY,
-        Accept: "application/json",
+        // Required by Nominatim ToS: identify your app
+        "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
+        "Accept-Language": "en",
       },
     });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`❌ Foursquare v3 error ${response.status}:`, errText);
+      console.error(`❌ Nominatim error ${response.status}:`, errText);
       return res.status(502).json({ message: "Place search failed", detail: errText });
     }
 
-    const data = await response.json();
+    const places = await response.json();
+    console.log(`✅ Nominatim returned ${places.length} results`);
 
-    // v3 response format: data.results
-    const places = data.results || [];
+    // Flatten to the same shape your frontend expects
+    const results = places.map((place) => {
+      const addr = place.address || {};
 
-    console.log(`✅ Foursquare v3 returned ${places.length} results`);
+      // Build a human-readable address from components
+      const addressParts = [
+        addr.road || addr.pedestrian || addr.footway,
+        addr.suburb || addr.neighbourhood || addr.quarter,
+        addr.city || addr.town || addr.village || addr.county,
+        addr.state,
+        addr.country,
+      ].filter(Boolean);
 
-    // Flatten response for your frontend
-    const results = places.map((place) => ({
-      placeId: place.fsq_id,
-      name: place.name || "",
-      address:
-        place.location?.formatted_address ||
-        place.location?.address ||
-        "Address not specified",
-      source: "foursquare",
-      type: "Standalone",
-      totalContributions: 0,
-      isVerified: false,
-    }));
+      const formattedAddress =
+        addressParts.length > 0
+          ? addressParts.join(", ")
+          : place.display_name || "Address not available";
 
-    return res.status(200).json(results);
+      // Use display_name as the business name if no specific name exists
+      const name =
+        place.name ||
+        addr.amenity ||
+        addr.shop ||
+        addr.tourism ||
+        place.display_name.split(",")[0];
+
+      return {
+        placeId: `osm_${place.osm_type}_${place.osm_id}`,
+        name: name.trim(),
+        address: formattedAddress,
+        source: "nominatim",
+        type: "Standalone",
+        totalContributions: 0,
+        isVerified: false,
+        // Extra fields available if you want them later:
+        // lat: parseFloat(place.lat),
+        // lng: parseFloat(place.lon),
+        // osmType: place.osm_type,
+        // category: place.class,
+        // placeType: place.type,
+      };
+    });
+
+    // Filter out purely geographic results (countries, states, roads)
+    // that aren't useful as business listings
+    const GEOGRAPHIC_CLASSES = new Set([
+      "boundary", "place", "highway", "waterway",
+      "natural", "landuse", "railway", "aeroway",
+    ]);
+
+    const filtered = results.filter((r, idx) => {
+      const cls = places[idx]?.class;
+      return !GEOGRAPHIC_CLASSES.has(cls);
+    });
+
+    return res.status(200).json(filtered.length > 0 ? filtered : results);
   } catch (error) {
-    console.error("❌ Network error during Foursquare execution:", error);
-    return res.status(502).json({ message: "Foursquare service integration error" });
+    console.error("❌ Nominatim fetch error:", error);
+    return res.status(502).json({ message: "Place search service error" });
   }
 });
 
@@ -81,6 +120,8 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
  * @desc  Reverse geocode lat/lng → address via Google Geocoding API
  * @route GET /api/businesses/geocode?lat=X&lng=Y
  * @access Public
+ *
+ * Falls back to Nominatim reverse geocoding if GOOGLE_API_KEY is not set.
  */
 const reverseGeocode = asyncHandler(async (req, res) => {
   const { lat, lng } = req.query;
@@ -89,47 +130,96 @@ const reverseGeocode = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "lat and lng query params are required" });
   }
 
-  if (!GOOGLE_API_KEY) {
-    return res.status(500).json({ message: "Geocoding is not configured" });
-  }
-
   console.log(`[Geocode] Fetching for lat=${lat}, lng=${lng}`);
 
-  const geocodeRes = await fetch(
-    `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`
-  );
-  const geocodeData = await geocodeRes.json();
-  console.log("[Geocode] status:", geocodeData.status);
+  // ── Prefer Google if key is available ──────────────────────────────────────
+  if (GOOGLE_API_KEY) {
+    const geocodeRes = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`
+    );
+    const geocodeData = await geocodeRes.json();
+    console.log("[Geocode] Google status:", geocodeData.status);
 
-  let nearbyName = null;
-  try {
-    const nearbyRes = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": GOOGLE_API_KEY,
-        "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
-      },
-      body: JSON.stringify({
-        locationRestriction: {
-          circle: {
-            center: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
-            radius: 100.0,
-          },
+    let nearbyName = null;
+    try {
+      const nearbyRes = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": GOOGLE_API_KEY,
+          "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
         },
-        maxResultCount: 1,
-      }),
-    });
-    const nearbyData = await nearbyRes.json();
-    nearbyName = nearbyData.places?.[0]?.displayName?.text ?? null;
-  } catch (e) {
-    console.log("[Nearby Verification Failed] Continuing with geocode profile mapping.");
+        body: JSON.stringify({
+          locationRestriction: {
+            circle: {
+              center: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
+              radius: 100.0,
+            },
+          },
+          maxResultCount: 1,
+        }),
+      });
+      const nearbyData = await nearbyRes.json();
+      nearbyName = nearbyData.places?.[0]?.displayName?.text ?? null;
+    } catch (e) {
+      console.log("[Nearby Verification Failed] Continuing with geocode data.");
+    }
+
+    return res.status(200).json({ ...geocodeData, nearbyName });
   }
 
-  res.status(200).json({
-    ...geocodeData,
-    nearbyName,
-  });
+  // ── Fallback: Nominatim reverse geocoding (free) ───────────────────────────
+  console.log("[Geocode] No Google key — falling back to Nominatim reverse geocode");
+  try {
+    const url =
+      `https://nominatim.openstreetmap.org/reverse` +
+      `?lat=${lat}&lon=${lng}` +
+      `&format=json` +
+      `&addressdetails=1`;
+
+    const nominatimRes = await fetch(url, {
+      headers: {
+        "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
+        "Accept-Language": "en",
+      },
+    });
+
+    if (!nominatimRes.ok) {
+      return res.status(502).json({ message: "Reverse geocode failed" });
+    }
+
+    const data = await nominatimRes.json();
+    const addr = data.address || {};
+
+    const formatted =
+      [
+        addr.road || addr.pedestrian,
+        addr.suburb || addr.neighbourhood,
+        addr.city || addr.town || addr.village,
+        addr.state,
+        addr.country,
+      ]
+        .filter(Boolean)
+        .join(", ") || data.display_name;
+
+    // Return in a shape that mirrors the Google response your frontend may expect
+    return res.status(200).json({
+      status: "OK",
+      results: [
+        {
+          formatted_address: formatted,
+          geometry: {
+            location: { lat: parseFloat(lat), lng: parseFloat(lng) },
+          },
+        },
+      ],
+      nearbyName: data.name || data.display_name?.split(",")[0] || null,
+      _source: "nominatim",
+    });
+  } catch (error) {
+    console.error("❌ Nominatim reverse geocode error:", error);
+    return res.status(502).json({ message: "Reverse geocode service error" });
+  }
 });
 
 /**
@@ -258,7 +348,7 @@ const createBusiness = asyncHandler(async (req, res) => {
         name,
         address,
         type: type || "Standalone",
-        source: "foursquare",
+        source: source || "nominatim",
         placeId,
         tags: courierType ? [courierType] : [],
       });
