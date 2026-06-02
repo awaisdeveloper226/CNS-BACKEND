@@ -5,12 +5,15 @@ const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 
-// ── Google Places API (New) config ────────────────────────────────────────────
-const GOOGLE_PLACES_URL = "https://places.googleapis.com/v1/places:searchText";
+// ── Foursquare Places API Config ──────────────────────────────────────────────
+const FOURSQUARE_PLACES_URL = "https://api.foursquare.com/v3/places/search";
+const FOURSQUARE_API_KEY = process.env.FOURSQUARE_API_KEY;
+// Keep the Google key for your reverseGeocode proxy if it's still needed, 
+// but the main business search is now migrated to Foursquare.
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
 /**
- * @desc  Search Google Places (New) for businesses worldwide
+ * @desc  Search Foursquare Places (v3) for businesses worldwide
  * @route GET /api/businesses/places-search?q=KFC+Lahore
  * @access Public
  */
@@ -21,54 +24,56 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Query parameter 'q' is required" });
   }
 
-  if (!GOOGLE_API_KEY) {
-    console.error("❌ GOOGLE_PLACES_API_KEY is not set in environment variables");
+  if (!FOURSQUARE_API_KEY) {
+    console.error("❌ FOURSQUARE_API_KEY is not set in environment variables");
     return res.status(500).json({ message: "Places search is not configured" });
   }
 
-  console.log("🔍 Google Places (New) request for query:", q.trim());
+  console.log("🔍 Foursquare Places request for query:", q.trim());
 
-  const response = await fetch(GOOGLE_PLACES_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Goog-Api-Key": GOOGLE_API_KEY,
-      "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress",
-    },
-    body: JSON.stringify({ textQuery: q.trim() }),
-  });
+  try {
+    // Construct the search URL using Foursquare query parameters
+    const url = `${FOURSQUARE_PLACES_URL}?query=${encodeURIComponent(q.trim())}&limit=20`;
 
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error(`❌ Google Places error ${response.status}:`, errText);
-    return res.status(502).json({ message: "Place search failed", detail: errText });
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "Authorization": FOURSQUARE_API_KEY,
+      },
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`❌ Foursquare Places error ${response.status}:`, errText);
+      return res.status(502).json({ message: "Place search failed", detail: errText });
+    }
+
+    const data = await response.json();
+    console.log(`✅ Foursquare Places returned ${(data.results || []).length} results`);
+
+    // Map Foursquare v3 format back to the expected application data shape
+    const results = (data.results || []).map((place) => ({
+      placeId: place.fsq_id,
+      name: place.name || "",
+      address: place.location?.formatted_address || place.location?.address || "",
+      source: "foursquare", 
+      type: "Standalone",
+      totalContributions: 0,
+      isVerified: false,
+    }));
+
+    return res.status(200).json(results);
+  } catch (error) {
+    console.error("❌ Network error during Foursquare execution:", error);
+    return res.status(502).json({ message: "Foursquare service integration error" });
   }
-
-  const data = await response.json();
-  console.log(`✅ Google Places returned ${(data.places || []).length} results`);
-
-  const results = (data.places || []).map((place) => ({
-    placeId: place.id,
-    name: place.displayName?.text || "",
-    address: place.formattedAddress || "",
-    source: "foursquare", // keep field name consistent with rest of codebase
-    type: "Standalone",
-    totalContributions: 0,
-    isVerified: false,
-  }));
-
-  res.status(200).json(results);
 });
 
 /**
  * @desc  Reverse geocode lat/lng → address via Google Geocoding API
  * @route GET /api/businesses/geocode?lat=X&lng=Y
  * @access Public
- *
- * Why this exists as a backend proxy:
- * The Google Geocoding API blocks requests from WebViews because they send
- * no HTTP referrer header. Calling it from the backend (server-to-server)
- * has no referrer restriction so it always succeeds.
  */
 const reverseGeocode = asyncHandler(async (req, res) => {
   const { lat, lng } = req.query;
@@ -83,43 +88,43 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 
   console.log(`[Geocode] Fetching for lat=${lat}, lng=${lng}`);
 
-  // ── 1. Reverse geocode via new Geocoding API (v1) ──────────────────────
   const geocodeRes = await fetch(
     `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`
   );
   const geocodeData = await geocodeRes.json();
   console.log("[Geocode] status:", geocodeData.status);
 
-  // ── 2. Nearby search via new Places API (v1) ───────────────────────────
-  const nearbyRes = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Goog-Api-Key": GOOGLE_API_KEY,
-      "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
-    },
-    body: JSON.stringify({
-      locationRestriction: {
-        circle: {
-          center: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
-          radius: 100.0, // 100 metres
-        },
+  // Fallback checking logic for standard internal nearby places mapping
+  let nearbyName = null;
+  try {
+    const nearbyRes = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_API_KEY,
+        "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
       },
-      maxResultCount: 1,
-    }),
-  });
-  const nearbyData = await nearbyRes.json();
-  console.log("[Nearby] response:", JSON.stringify(nearbyData));
-
-  const nearbyName = nearbyData.places?.[0]?.displayName?.text ?? null;
-  console.log("[Nearby] nearbyName:", nearbyName);
+      body: JSON.stringify({
+        locationRestriction: {
+          circle: {
+            center: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
+            radius: 100.0,
+          },
+        },
+        maxResultCount: 1,
+      }),
+    });
+    const nearbyData = await nearbyRes.json();
+    nearbyName = nearbyData.places?.[0]?.displayName?.text ?? null;
+  } catch (e) {
+    console.log("[Nearby Verification Failed] Continuing with geocode profile mapping.");
+  }
 
   res.status(200).json({
     ...geocodeData,
     nearbyName,
   });
 });
-
 
 /**
  * @desc  Get all businesses (including search for frontend)
@@ -167,12 +172,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Business not found");
   }
-
-  console.log(
-    "✅ Business found with",
-    business.contributions?.length || 0,
-    "contributions"
-  );
 
   if (business.contributions && business.contributions.length > 0) {
     business.contributions.sort((a, b) => {
@@ -241,7 +240,6 @@ const createBusiness = asyncHandler(async (req, res) => {
     throw new Error("Name and address are required");
   }
 
-  // ── Google Places-sourced business (placeId present) ─────────────────────
   if (placeId) {
     const existing = await Business.findOne({ placeId });
     if (existing) {
@@ -260,8 +258,6 @@ const createBusiness = asyncHandler(async (req, res) => {
       return res.status(201).json(business);
     } catch (err) {
       if (err.code === 11000) {
-        // Race condition: another request created this placeId just after our
-        // findOne check — find and return the existing record instead of failing
         const race = await Business.findOne({ placeId });
         if (race) return res.status(200).json(race);
       }
@@ -269,7 +265,6 @@ const createBusiness = asyncHandler(async (req, res) => {
     }
   }
 
-  // ── Manual business creation ──────────────────────────────────────────────
   if (!type || !courierType) {
     res.status(400);
     throw new Error("Name, address, type, and courier type are required");
@@ -290,8 +285,6 @@ const createBusiness = asyncHandler(async (req, res) => {
 
   const existing = await Business.findOne({ name, address });
   if (existing) {
-    // Return the existing business instead of erroring — the app can continue
-    // with it rather than showing a failure message to the user
     return res.status(200).json(existing);
   }
 
@@ -302,19 +295,12 @@ const createBusiness = asyncHandler(async (req, res) => {
       type,
       source: "manual",
       tags: [courierType],
-      // ⚠️  Do NOT set placeId here at all — omitting the field entirely
-      // (rather than setting it to null) is what makes the sparse unique
-      // index ignore these documents and prevents the duplicate key error
     });
     return res.status(201).json(business);
   } catch (err) {
     if (err.code === 11000) {
-      // Race condition between our findOne check and the create call —
-      // find and return the record that won the race
       const race = await Business.findOne({ name, address });
       if (race) return res.status(200).json(race);
-
-      // Shouldn't reach here, but surface a clean error if it does
       res.status(400);
       throw new Error("A business with this name and address already exists.");
     }
