@@ -5,15 +5,13 @@ const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 
-// ── Foursquare Places API Config ──────────────────────────────────────────────
-const FOURSQUARE_PLACES_URL = "https://api.foursquare.com/v3/places/search";
+// ── Foursquare Legacy/v2 API Config ──────────────────────────────────────────
 const FOURSQUARE_API_KEY = process.env.FOURSQUARE_API_KEY;
-// Keep the Google key for your reverseGeocode proxy if it's still needed, 
-// but the main business search is now migrated to Foursquare.
+// Google key reserved strictly for backend-to-server geocoding proxy actions
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
 /**
- * @desc  Search Foursquare Places (v3) for businesses worldwide
+ * @desc  Search Foursquare Places (v2 Legacy) for businesses worldwide
  * @route GET /api/businesses/places-search?q=KFC+Lahore
  * @access Public
  */
@@ -29,34 +27,29 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     return res.status(500).json({ message: "Places search is not configured" });
   }
 
-  console.log("🔍 Foursquare Places request for query:", q.trim());
+  console.log("🔍 Foursquare v2 Places request for query:", q.trim());
 
   try {
-    // Construct the search URL using Foursquare query parameters
-    const url = `${FOURSQUARE_PLACES_URL}?query=${encodeURIComponent(q.trim())}&limit=20`;
+    // Target the robust v2 venues endpoint utilizing your authentic token parameter
+    const url = `https://api.foursquare.com/v2/venues/search?v=20240101&intent=browse&near=Pakistan&query=${encodeURIComponent(q.trim())}&oauth_token=${FOURSQUARE_API_KEY}&limit=20`;
 
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-        "Authorization": FOURSQUARE_API_KEY,
-      },
-    });
+    const response = await fetch(url, { method: "GET" });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`❌ Foursquare Places error ${response.status}:`, errText);
+      console.error(`❌ Foursquare v2 Places error ${response.status}:`, errText);
       return res.status(502).json({ message: "Place search failed", detail: errText });
     }
 
     const data = await response.json();
-    console.log(`✅ Foursquare Places returned ${(data.results || []).length} results`);
+    const venues = data.response?.venues || [];
+    console.log(`✅ Foursquare v2 returned ${venues.length} results`);
 
-    // Map Foursquare v3 format back to the expected application data shape
-    const results = (data.results || []).map((place) => ({
-      placeId: place.fsq_id,
-      name: place.name || "",
-      address: place.location?.formatted_address || place.location?.address || "",
+    // Flatten venue results explicitly to match the frontend scoring schema structural requirements
+    const results = venues.map((venue) => ({
+      placeId: venue.id,
+      name: venue.name || "",
+      address: venue.location?.formattedAddress?.join(", ") || venue.location?.address || "Address not specified",
       source: "foursquare", 
       type: "Standalone",
       totalContributions: 0,
@@ -94,7 +87,6 @@ const reverseGeocode = asyncHandler(async (req, res) => {
   const geocodeData = await geocodeRes.json();
   console.log("[Geocode] status:", geocodeData.status);
 
-  // Fallback checking logic for standard internal nearby places mapping
   let nearbyName = null;
   try {
     const nearbyRes = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
