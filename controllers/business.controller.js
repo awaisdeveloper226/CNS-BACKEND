@@ -414,10 +414,63 @@ const createBusiness = asyncHandler(async (req, res) => {
   }
 });
 
+
+
+
+
+
+
+const updateEntryPin = asyncHandler(async (req, res) => {
+  const { lat, lng, label, updatedBy } = req.body;
+
+  // Allow explicit null/null to clear the pin
+  const isClearing = lat === null && lng === null;
+
+  if (!isClearing) {
+    if (typeof lat !== 'number' || typeof lng !== 'number') {
+      res.status(400);
+      throw new Error('lat and lng must be numbers (or both null to clear)');
+    }
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      res.status(400);
+      throw new Error('lat/lng out of valid range');
+    }
+  }
+
+  const business = await Business.findById(req.params.id);
+  if (!business) {
+    res.status(404);
+    throw new Error('Business not found');
+  }
+
+  business.entryPin = isClearing
+    ? { lat: null, lng: null, label: '', updatedBy: '', updatedAt: null }
+    : {
+        lat,
+        lng,
+        label: (label || '').trim().slice(0, 100),
+        updatedBy: (updatedBy || 'Anonymous Courier').trim().slice(0, 60),
+        updatedAt: new Date(),
+      };
+
+  await business.save();
+
+  res.status(200).json({
+    message: isClearing ? 'Entry pin cleared' : 'Entry pin updated',
+    entryPin: business.entryPin,
+  });
+});
+
+
+
+
+
+
 module.exports = {
   searchFoursquarePlaces,
   reverseGeocode,
   getBusinesses,
   getBusinessDetails,
   createBusiness,
+   updateEntryPin,
 };
