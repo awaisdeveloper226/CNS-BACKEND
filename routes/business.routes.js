@@ -9,6 +9,7 @@ const {
   getBusinesses,
   getBusinessDetails,
   createBusiness,
+  updateEntryPin
 } = require('../controllers/business.controller');
 
 // ── IMPORTANT: specific GET routes MUST be declared before /:id ──────────────
