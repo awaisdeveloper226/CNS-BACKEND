@@ -25,4 +25,7 @@ router.get('/:id', getBusinessDetails);
 // Create business (authenticated)
 router.post('/', uploadKeyOrProtect, createBusiness);
 
+
+router.patch('/:id/entry-pin', updateEntryPin); 
+
 module.exports = router;
