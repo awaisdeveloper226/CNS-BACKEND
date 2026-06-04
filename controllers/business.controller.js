@@ -238,10 +238,19 @@ const getBusinesses = asyncHandler(async (req, res) => {
       }
     : {};
 
-  const businesses = await Business.find(keyword).sort({
-    totalContributions: -1,
-  });
-  res.status(200).json(businesses);
+  const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0; // 0 = no limit in Mongoose
+  const skip  = req.query.skip  ? parseInt(req.query.skip,  10) : 0;
+
+  const [businesses, total] = await Promise.all([
+    Business.find(keyword)
+      .sort({ totalContributions: -1 })
+      .skip(skip)
+      .limit(limit),
+    Business.countDocuments(keyword),
+  ]);
+
+  // Return both the page + total so frontend knows when it's done
+  res.status(200).json({ businesses, total });
 });
 
 /**
