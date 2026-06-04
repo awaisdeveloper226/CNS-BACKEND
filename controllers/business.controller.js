@@ -11,9 +11,6 @@ const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
  * @desc  Search places via Nominatim (OpenStreetMap) — free, no API key required
  * @route GET /api/businesses/places-search?q=KFC+Lahore
  * @access Public
- *
- * Nominatim ToS: include a descriptive User-Agent, max 1 req/sec.
- * For higher traffic, self-host: https://nominatim.org/release-docs/develop/admin/Installation/
  */
 const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   const { q } = req.query;
@@ -26,9 +23,6 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   console.log("🔍 Nominatim places search for query:", query);
 
   try {
-    // Nominatim free geocoding/search — no API key needed
-    // addressdetails=1 gives us structured address components
-    // limit=20 is the max Nominatim allows per request
     const url =
       `https://nominatim.openstreetmap.org/search` +
       `?q=${encodeURIComponent(query)}` +
@@ -39,7 +33,6 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
 
     const response = await fetch(url, {
       headers: {
-        // Required by Nominatim ToS: identify your app
         "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
         "Accept-Language": "en",
       },
@@ -54,11 +47,9 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     const places = await response.json();
     console.log(`✅ Nominatim returned ${places.length} results`);
 
-    // Flatten to the same shape your frontend expects
     const results = places.map((place) => {
       const addr = place.address || {};
 
-      // Build a human-readable address from components
       const addressParts = [
         addr.road || addr.pedestrian || addr.footway,
         addr.suburb || addr.neighbourhood || addr.quarter,
@@ -72,7 +63,6 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
           ? addressParts.join(", ")
           : place.display_name || "Address not available";
 
-      // Use display_name as the business name if no specific name exists
       const name =
         place.name ||
         addr.amenity ||
@@ -88,17 +78,9 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
         type: "Standalone",
         totalContributions: 0,
         isVerified: false,
-        // Extra fields available if you want them later:
-        // lat: parseFloat(place.lat),
-        // lng: parseFloat(place.lon),
-        // osmType: place.osm_type,
-        // category: place.class,
-        // placeType: place.type,
       };
     });
 
-    // Filter out purely geographic results (countries, states, roads)
-    // that aren't useful as business listings
     const GEOGRAPHIC_CLASSES = new Set([
       "boundary", "place", "highway", "waterway",
       "natural", "landuse", "railway", "aeroway",
@@ -117,11 +99,9 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc  Reverse geocode lat/lng → address via Google Geocoding API
+ * @desc  Reverse geocode lat/lng → address
  * @route GET /api/businesses/geocode?lat=X&lng=Y
  * @access Public
- *
- * Falls back to Nominatim reverse geocoding if GOOGLE_API_KEY is not set.
  */
 const reverseGeocode = asyncHandler(async (req, res) => {
   const { lat, lng } = req.query;
@@ -132,7 +112,6 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 
   console.log(`[Geocode] Fetching for lat=${lat}, lng=${lng}`);
 
-  // ── Prefer Google if key is available ──────────────────────────────────────
   if (GOOGLE_API_KEY) {
     const geocodeRes = await fetch(
       `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`
@@ -168,7 +147,6 @@ const reverseGeocode = asyncHandler(async (req, res) => {
     return res.status(200).json({ ...geocodeData, nearbyName });
   }
 
-  // ── Fallback: Nominatim reverse geocoding (free) ───────────────────────────
   console.log("[Geocode] No Google key — falling back to Nominatim reverse geocode");
   try {
     const url =
@@ -202,7 +180,6 @@ const reverseGeocode = asyncHandler(async (req, res) => {
         .filter(Boolean)
         .join(", ") || data.display_name;
 
-    // Return in a shape that mirrors the Google response your frontend may expect
     return res.status(200).json({
       status: "OK",
       results: [
@@ -223,7 +200,7 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc  Get all businesses (including search for frontend)
+ * @desc  Get all businesses
  * @route GET /api/businesses
  * @access Public
  */
@@ -238,7 +215,7 @@ const getBusinesses = asyncHandler(async (req, res) => {
       }
     : {};
 
-  const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0; // 0 = no limit in Mongoose
+  const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0;
   const skip  = req.query.skip  ? parseInt(req.query.skip,  10) : 0;
 
   const [businesses, total] = await Promise.all([
@@ -249,7 +226,6 @@ const getBusinesses = asyncHandler(async (req, res) => {
     Business.countDocuments(keyword),
   ]);
 
-  // Return both the page + total so frontend knows when it's done
   res.status(200).json({ businesses, total });
 });
 
@@ -257,6 +233,11 @@ const getBusinesses = asyncHandler(async (req, res) => {
  * @desc  Get single business by ID with its instructions
  * @route GET /api/businesses/:id
  * @access Public
+ *
+ * BUG FIX: The previous version manually assembled detailedBusiness but
+ * omitted the `entryPin` field entirely. This meant every load returned
+ * entryPin: undefined → frontend treated it as null and the pin "vanished"
+ * even though it was correctly stored in MongoDB.
  */
 const getBusinessDetails = asyncHandler(async (req, res) => {
   console.log("🔍 Fetching business details for ID:", req.params.id);
@@ -306,6 +287,13 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     totalContributions: business.totalContributions,
     isVerified: business.isVerified,
     coordinates: business.coordinates,
+
+    // ── FIX: include entryPin so the frontend can show/restore it ──────────
+    // Previously this field was missing from the response, causing the pin
+    // to appear "cleared" on every page load even though it was saved in DB.
+    entryPin: business.entryPin ?? null,
+    // ───────────────────────────────────────────────────────────────────────
+
     contributions: business.contributions.map((instr) => ({
       id: instr._id,
       notes: instr.notes || "",
@@ -414,57 +402,50 @@ const createBusiness = asyncHandler(async (req, res) => {
   }
 });
 
-
-
-
-
-
-
+/**
+ * @desc  Save / update / clear the courier entry pin for a business
+ * @route PATCH /api/businesses/:id/entry-pin
+ * @access Public (community editable)
+ */
 const updateEntryPin = asyncHandler(async (req, res) => {
   const { lat, lng, label, updatedBy } = req.body;
 
-  // Allow explicit null/null to clear the pin
   const isClearing = lat === null && lng === null;
 
   if (!isClearing) {
-    if (typeof lat !== 'number' || typeof lng !== 'number') {
+    if (typeof lat !== "number" || typeof lng !== "number") {
       res.status(400);
-      throw new Error('lat and lng must be numbers (or both null to clear)');
+      throw new Error("lat and lng must be numbers (or both null to clear)");
     }
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
       res.status(400);
-      throw new Error('lat/lng out of valid range');
+      throw new Error("lat/lng out of valid range");
     }
   }
 
   const business = await Business.findById(req.params.id);
   if (!business) {
     res.status(404);
-    throw new Error('Business not found');
+    throw new Error("Business not found");
   }
 
   business.entryPin = isClearing
-    ? { lat: null, lng: null, label: '', updatedBy: '', updatedAt: null }
+    ? { lat: null, lng: null, label: "", updatedBy: "", updatedAt: null }
     : {
         lat,
         lng,
-        label: (label || '').trim().slice(0, 100),
-        updatedBy: (updatedBy || 'Anonymous Courier').trim().slice(0, 60),
+        label: (label || "").trim().slice(0, 100),
+        updatedBy: (updatedBy || "Anonymous Courier").trim().slice(0, 60),
         updatedAt: new Date(),
       };
 
   await business.save();
 
   res.status(200).json({
-    message: isClearing ? 'Entry pin cleared' : 'Entry pin updated',
+    message: isClearing ? "Entry pin cleared" : "Entry pin updated",
     entryPin: business.entryPin,
   });
 });
-
-
-
-
-
 
 module.exports = {
   searchFoursquarePlaces,
@@ -472,5 +453,5 @@ module.exports = {
   getBusinesses,
   getBusinessDetails,
   createBusiness,
-   updateEntryPin,
+  updateEntryPin,
 };
