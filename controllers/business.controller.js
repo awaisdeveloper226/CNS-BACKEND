@@ -482,6 +482,39 @@ const updateEntryPin = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Builds a list of progressively simplified address strings to try with Nominatim.
+ * Nominatim struggles with unit/shop numbers and mall-style addresses.
+ * e.g. "Unit 4, 60 Belmore Rd, Punchbowl NSW 2196"
+ *   → ["Unit 4, 60 Belmore Rd, Punchbowl NSW 2196",   // original
+ *      "60 Belmore Rd, Punchbowl NSW 2196",            // strip unit prefix
+ *      "Belmore Rd, Punchbowl NSW 2196",               // strip street number
+ *      "Punchbowl NSW 2196"]                           // suburb + state only
+ */
+function buildAddressVariants(address) {
+  const variants = [address]; // always try original first
+
+  // Strip leading unit/shop/level/suite prefix
+  // Matches: "Unit 4, ...", "Shop 35/32-40 ...", "Level 2, ...", "Suite 3/..."
+  const stripped = address
+    .replace(/^(unit|shop|suite|level|lot|apt|apartment|flat|kiosk)\s*[\w\/-]+[,\s]*/i, "")
+    .trim();
+  if (stripped && stripped !== address) variants.push(stripped);
+
+  // Strip the street number too (just street name + suburb)
+  const noNumber = stripped.replace(/^\d+[\w-]*\s*/, "").trim();
+  if (noNumber && noNumber !== stripped) variants.push(noNumber);
+
+  // Last resort: take the last 2 comma-separated parts (suburb/state/postcode)
+  const parts = address.split(",").map((p) => p.trim()).filter(Boolean);
+  if (parts.length > 2) {
+    variants.push(parts.slice(-2).join(", "));
+  }
+
+  // Deduplicate while preserving order
+  return [...new Set(variants)];
+}
+
+/**
  * @desc  One-time admin utility — backfills coordinates for all businesses
  *        that have coordinates.lat == null by geocoding their address via Nominatim.
  * @route GET /api/businesses/admin/backfill-coordinates?secret=cns-backfill-2024
@@ -532,29 +565,44 @@ const backfillCoordinates = async (req, res) => {
     }
 
     try {
-      const url =
-        `https://nominatim.openstreetmap.org/search` +
-        `?q=${encodeURIComponent(b.address)}&format=json&limit=1`;
+      // Try progressively simplified versions of the address until one geocodes.
+      // This handles: "Unit 4, 60 Belmore Rd" → "60 Belmore Rd, Punchbowl NSW"
+      //               "Shop 35/32-40 Stockton Ave" → "Stockton Ave, Moorebank NSW"
+      const addressVariants = buildAddressVariants(b.address);
 
-      const geoRes = await fetch(url, {
-        headers: {
-          "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
-          "Accept-Language": "en",
-        },
-      });
-      const geoData = await geoRes.json();
+      let found = false;
+      for (const variant of addressVariants) {
+        const url =
+          `https://nominatim.openstreetmap.org/search` +
+          `?q=${encodeURIComponent(variant)}&format=json&limit=1`;
 
-      if (geoData?.[0]) {
-        const lat = parseFloat(geoData[0].lat);
-        const lng = parseFloat(geoData[0].lon);
-        await Business.findByIdAndUpdate(b._id, {
-          "coordinates.lat": lat,
-          "coordinates.lng": lng,
+        const geoRes = await fetch(url, {
+          headers: {
+            "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
+            "Accept-Language": "en",
+          },
         });
-        results.success++;
-        results.details.push({ name: b.name, status: "ok", lat, lng });
-        console.log(`[Backfill] ✓ ${i + 1}/${businesses.length} — ${b.name}`);
-      } else {
+        const geoData = await geoRes.json();
+
+        if (geoData?.[0]) {
+          const lat = parseFloat(geoData[0].lat);
+          const lng = parseFloat(geoData[0].lon);
+          await Business.findByIdAndUpdate(b._id, {
+            "coordinates.lat": lat,
+            "coordinates.lng": lng,
+          });
+          results.success++;
+          results.details.push({ name: b.name, status: "ok", lat, lng, usedVariant: variant });
+          console.log(`[Backfill] ✓ ${i + 1}/${businesses.length} — ${b.name} (via: "${variant}")`);
+          found = true;
+          break;
+        }
+
+        // Rate limit between variant attempts too
+        await new Promise((r) => setTimeout(r, 1100));
+      }
+
+      if (!found) {
         results.failed++;
         results.details.push({ name: b.name, address: b.address, status: "not found" });
         console.log(`[Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (not found)`);
