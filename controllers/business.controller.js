@@ -481,6 +481,94 @@ const updateEntryPin = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * @desc  One-time admin utility — backfills coordinates for all businesses
+ *        that have coordinates.lat == null by geocoding their address via Nominatim.
+ * @route GET /api/businesses/admin/backfill-coordinates?secret=cns-backfill-2024
+ * @access Admin only (secret key in query param)
+ *
+ * USAGE: Hit this URL once from a browser after deploying, then remove the route.
+ * Takes ~1.1s per business (Nominatim rate limit). Returns a full JSON report.
+ */
+const backfillCoordinates = async (req, res) => {
+  if (req.query.secret !== "cns-backfill-2024") {
+    return res.status(403).json({ message: "Forbidden — wrong secret" });
+  }
+
+  const businesses = await Business.find({
+    $or: [
+      { "coordinates.lat": null },
+      { "coordinates.lat": { $exists: false } },
+    ],
+  }).select("_id name address");
+
+  console.log(`[Backfill] Starting — ${businesses.length} businesses to process`);
+
+  const results = {
+    total: businesses.length,
+    success: 0,
+    failed: 0,
+    skipped: 0,
+    details: [],
+  };
+
+  for (let i = 0; i < businesses.length; i++) {
+    const b = businesses[i];
+
+    // Re-check in case lazy backfill already filled it
+    const fresh = await Business.findById(b._id).select("coordinates");
+    if (fresh?.coordinates?.lat != null) {
+      results.skipped++;
+      results.details.push({ name: b.name, status: "skipped" });
+      continue;
+    }
+
+    try {
+      const url =
+        `https://nominatim.openstreetmap.org/search` +
+        `?q=${encodeURIComponent(b.address)}&format=json&limit=1`;
+
+      const geoRes = await fetch(url, {
+        headers: {
+          "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
+          "Accept-Language": "en",
+        },
+      });
+      const geoData = await geoRes.json();
+
+      if (geoData?.[0]) {
+        const lat = parseFloat(geoData[0].lat);
+        const lng = parseFloat(geoData[0].lon);
+        await Business.findByIdAndUpdate(b._id, {
+          "coordinates.lat": lat,
+          "coordinates.lng": lng,
+        });
+        results.success++;
+        results.details.push({ name: b.name, status: "ok", lat, lng });
+        console.log(`[Backfill] ✓ ${i + 1}/${businesses.length} — ${b.name}`);
+      } else {
+        results.failed++;
+        results.details.push({ name: b.name, address: b.address, status: "not found" });
+        console.log(`[Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (not found)`);
+      }
+    } catch (err) {
+      results.failed++;
+      results.details.push({ name: b.name, status: "error", error: err.message });
+      console.log(`[Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (${err.message})`);
+    }
+
+    // Respect Nominatim's 1 req/sec rate limit
+    if (i < businesses.length - 1) {
+      await new Promise((r) => setTimeout(r, 1100));
+    }
+  }
+
+  console.log(
+    `[Backfill] Done — success:${results.success} failed:${results.failed} skipped:${results.skipped}`
+  );
+  return res.status(200).json(results);
+};
+
 module.exports = {
   searchFoursquarePlaces,
   reverseGeocode,
@@ -488,4 +576,5 @@ module.exports = {
   getBusinessDetails,
   createBusiness,
   updateEntryPin,
+  backfillCoordinates,
 };
