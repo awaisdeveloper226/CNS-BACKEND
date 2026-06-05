@@ -78,6 +78,8 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
         type: "Standalone",
         totalContributions: 0,
         isVerified: false,
+        lat: parseFloat(place.lat),
+        lng: parseFloat(place.lon),
       };
     });
 
@@ -348,6 +350,11 @@ const createBusiness = asyncHandler(async (req, res) => {
         source: source || "nominatim",
         placeId,
         tags: courierType ? [courierType] : [],
+        // Persist lat/lng so the entry-pin map centres correctly without geocoding
+        coordinates: {
+          lat: req.body.lat ?? null,
+          lng: req.body.lng ?? null,
+        },
       });
       return res.status(201).json(business);
     } catch (err) {
