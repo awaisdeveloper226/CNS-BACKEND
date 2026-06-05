@@ -495,17 +495,25 @@ const backfillCoordinates = async (req, res) => {
     return res.status(403).json({ message: "Forbidden — wrong secret" });
   }
 
-  const businesses = await Business.find({
-    $or: [
-      { "coordinates.lat": null },
-      { "coordinates.lat": { $exists: false } },
-    ],
-  }).select("_id name address");
+  // Fetch ALL businesses — filter in JS after inspecting actual values.
+  // This catches every possible "missing coords" state: null, 0, undefined,
+  // empty object, or a valid lat that was already geocoded.
+  const allBusinesses = await Business.find({}).select("_id name address coordinates");
+
+  // Keep only those that don't have a real non-zero lat/lng
+  const businesses = allBusinesses.filter((b) => {
+    const lat = b.coordinates?.lat;
+    const lng = b.coordinates?.lng;
+    return !lat || !lng || lat === 0 || lng === 0;
+  });
+
+  console.log(`[Backfill] Total in DB: ${allBusinesses.length} | Need coords: ${businesses.length}`);
 
   console.log(`[Backfill] Starting — ${businesses.length} businesses to process`);
 
   const results = {
-    total: businesses.length,
+    totalInDB: allBusinesses.length,
+    totalNeedingCoords: businesses.length,
     success: 0,
     failed: 0,
     skipped: 0,
