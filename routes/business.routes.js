@@ -9,15 +9,19 @@ const {
   getBusinesses,
   getBusinessDetails,
   createBusiness,
-  updateEntryPin
+  updateEntryPin,
+  backfillCoordinates,
 } = require('../controllers/business.controller');
 
 // ── IMPORTANT: specific GET routes MUST be declared before /:id ──────────────
-// Express matches routes top-to-bottom. If /:id came first, the strings
-// "places-search" and "geocode" would be treated as ids and hit getBusinessDetails.
 
 router.get('/places-search', searchFoursquarePlaces);
 router.get('/geocode', reverseGeocode);
+
+// ── ONE-TIME ADMIN UTILITY ────────────────────────────────────────────────────
+// After running, remove this line and redeploy.
+router.get('/admin/backfill-coordinates', backfillCoordinates);
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Public routes
 router.get('/', getBusinesses);
@@ -26,7 +30,6 @@ router.get('/:id', getBusinessDetails);
 // Create business (authenticated)
 router.post('/', uploadKeyOrProtect, createBusiness);
 
-
-router.patch('/:id/entry-pin', updateEntryPin); 
+router.patch('/:id/entry-pin', updateEntryPin);
 
 module.exports = router;
