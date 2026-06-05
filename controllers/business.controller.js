@@ -281,6 +281,33 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     commentCountMap[c._id.toString()] = c.count;
   });
 
+  // ── Lazy coordinate backfill ───────────────────────────────────────────────
+  // For businesses created before coordinates were stored, geocode the address
+  // now and save it so all future loads use priority-2 (instant, no network).
+  let coordinates = business.coordinates;
+  if (!coordinates?.lat && business.address) {
+    try {
+      const geoUrl =
+        `https://nominatim.openstreetmap.org/search` +
+        `?q=${encodeURIComponent(business.address)}&format=json&limit=1`;
+      const geoRes = await fetch(geoUrl, {
+        headers: { "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)" },
+      });
+      const geoData = await geoRes.json();
+      if (geoData?.[0]) {
+        const lat = parseFloat(geoData[0].lat);
+        const lng = parseFloat(geoData[0].lon);
+        coordinates = { lat, lng };
+        // Save back to DB so next load is instant (fire-and-forget)
+        Business.findByIdAndUpdate(business._id, {
+          "coordinates.lat": lat,
+          "coordinates.lng": lng,
+        }).catch(() => {});
+      }
+    } catch (_) {}
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   const detailedBusiness = {
     id: business._id,
     name: business.name,
@@ -288,7 +315,7 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     type: business.type,
     totalContributions: business.totalContributions,
     isVerified: business.isVerified,
-    coordinates: business.coordinates,
+    coordinates,
 
     // ── FIX: include entryPin so the frontend can show/restore it ──────────
     // Previously this field was missing from the response, causing the pin
