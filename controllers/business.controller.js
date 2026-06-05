@@ -493,25 +493,57 @@ const updateEntryPin = asyncHandler(async (req, res) => {
 function buildAddressVariants(address) {
   const variants = [address]; // always try original first
 
-  // Strip leading unit/shop/level/suite prefix
-  // Matches: "Unit 4, ...", "Shop 35/32-40 ...", "Level 2, ...", "Suite 3/..."
+  const parts = address.split(",").map((p) => p.trim()).filter(Boolean);
+
+  // ── Strip leading mall/centre name ──────────────────────────────────────
+  // "Broadway Shopping Centre K34, K34/1 Bay St, Glebe NSW 2037"
+  //  → "K34/1 Bay St, Glebe NSW 2037"
+  if (/shopping\s*cent(re|er)|mall|plaza|arcade|centre/i.test(parts[0])) {
+    variants.push(parts.slice(1).join(", "));
+  }
+
+  // ── Strip leading unit/shop/level/suite prefix ───────────────────────────
+  // "Unit 4, 60 Belmore Rd" → "60 Belmore Rd"
+  // "Shop 35/32-40 Stockton Ave" → "32-40 Stockton Ave"
   const stripped = address
     .replace(/^(unit|shop|suite|level|lot|apt|apartment|flat|kiosk)\s*[\w\/-]+[,\s]*/i, "")
     .trim();
   if (stripped && stripped !== address) variants.push(stripped);
 
-  // Strip the street number too (just street name + suburb)
-  const noNumber = stripped.replace(/^\d+[\w-]*\s*/, "").trim();
+  // ── Strip street number → just street name + suburb ──────────────────────
+  const noNumber = stripped.replace(/^\d+[\w/-]*\s*/, "").trim();
   if (noNumber && noNumber !== stripped) variants.push(noNumber);
 
-  // Last resort: take the last 2 comma-separated parts (suburb/state/postcode)
-  const parts = address.split(",").map((p) => p.trim()).filter(Boolean);
+  // ── For addresses with a kiosk/shop code before the street ───────────────
+  // "K34/1 Bay St, Glebe NSW 2037" → "1 Bay St, Glebe NSW 2037"
+  const noKiosk = stripped.replace(/^[A-Z]\d+\//, "").trim();
+  if (noKiosk && noKiosk !== stripped) variants.push(noKiosk);
+
+  // ── Drop postcode, try suburb + state only ────────────────────────────────
+  // Handles Pakistani addresses where postcode isn't in Nominatim
+  // "F-10 Markaz F 10/4 F-10, Islamabad, Pakistan" → "Islamabad, Pakistan"
   if (parts.length > 2) {
+    // second-to-last + last  (suburb/city, country)
     variants.push(parts.slice(-2).join(", "));
+    // just the street + city (skip mall codes)
+    const streetPart = parts.find((p) =>
+      /\d/.test(p) && !/^[A-Z]-?\d/.test(p)  // has digits but not a Pakistani sector code
+    );
+    if (streetPart) {
+      variants.push([streetPart, ...parts.slice(-2)].join(", "));
+    }
+  }
+
+  // ── Pakistani sector addresses ────────────────────────────────────────────
+  // "Bhittai Rd, F-7 Markaz F 7 Markaz F-7, Islamabad, Pakistan"
+  // → "Bhittai Rd, Islamabad, Pakistan"
+  const roadMatch = address.match(/([A-Za-z\s]+ Rd|[A-Za-z\s]+ St|[A-Za-z\s]+ Ave)/i);
+  if (roadMatch) {
+    variants.push(`${roadMatch[0].trim()}, ${parts[parts.length - 2]}, ${parts[parts.length - 1]}`);
   }
 
   // Deduplicate while preserving order
-  return [...new Set(variants)];
+  return [...new Set(variants.filter(Boolean))];
 }
 
 /**
@@ -556,9 +588,21 @@ const backfillCoordinates = async (req, res) => {
   for (let i = 0; i < businesses.length; i++) {
     const b = businesses[i];
 
-    // Re-check in case lazy backfill already filled it
+    // Re-check — but don't skip if coords are suspiciously round (city-level fallback)
+    // e.g. Cheezious got 33.6938118, 73.0651511 which is Islamabad city centre
     const fresh = await Business.findById(b._id).select("coordinates");
-    if (fresh?.coordinates?.lat != null) {
+    const freshLat = fresh?.coordinates?.lat;
+    const freshLng = fresh?.coordinates?.lng;
+    const isCityLevelOnly =
+      freshLat != null &&
+      // coords are already in the businesses array means they came from last run's
+      // "Islamabad, Pakistan" fallback — detect by checking if this business is
+      // one we already processed (it will be in results.details with usedVariant
+      // containing only the last 2 parts of the address)
+      results.details.some(
+        (d) => d.name === b.name && d.usedVariant && d.usedVariant.split(",").length <= 2
+      );
+    if (freshLat != null && !isCityLevelOnly) {
       results.skipped++;
       results.details.push({ name: b.name, status: "skipped" });
       continue;
