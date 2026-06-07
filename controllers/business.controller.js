@@ -235,11 +235,6 @@ const getBusinesses = asyncHandler(async (req, res) => {
  * @desc  Get single business by ID with its instructions
  * @route GET /api/businesses/:id
  * @access Public
- *
- * BUG FIX: The previous version manually assembled detailedBusiness but
- * omitted the `entryPin` field entirely. This meant every load returned
- * entryPin: undefined → frontend treated it as null and the pin "vanished"
- * even though it was correctly stored in MongoDB.
  */
 const getBusinessDetails = asyncHandler(async (req, res) => {
   console.log("🔍 Fetching business details for ID:", req.params.id);
@@ -282,8 +277,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
   });
 
   // ── Lazy coordinate backfill ───────────────────────────────────────────────
-  // For businesses created before coordinates were stored, geocode the address
-  // now and save it so all future loads use priority-2 (instant, no network).
   let coordinates = business.coordinates;
   if (!coordinates?.lat && business.address) {
     try {
@@ -298,7 +291,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
         const lat = parseFloat(geoData[0].lat);
         const lng = parseFloat(geoData[0].lon);
         coordinates = { lat, lng };
-        // Save back to DB so next load is instant (fire-and-forget)
         Business.findByIdAndUpdate(business._id, {
           "coordinates.lat": lat,
           "coordinates.lng": lng,
@@ -306,7 +298,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
       }
     } catch (_) {}
   }
-  // ─────────────────────────────────────────────────────────────────────────
 
   const detailedBusiness = {
     id: business._id,
@@ -316,13 +307,7 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
     totalContributions: business.totalContributions,
     isVerified: business.isVerified,
     coordinates,
-
-    // ── FIX: include entryPin so the frontend can show/restore it ──────────
-    // Previously this field was missing from the response, causing the pin
-    // to appear "cleared" on every page load even though it was saved in DB.
     entryPin: business.entryPin ?? null,
-    // ───────────────────────────────────────────────────────────────────────
-
     contributions: business.contributions.map((instr) => ({
       id: instr._id,
       notes: instr.notes || "",
@@ -377,7 +362,6 @@ const createBusiness = asyncHandler(async (req, res) => {
         source: source || "nominatim",
         placeId,
         tags: courierType ? [courierType] : [],
-        // Persist lat/lng so the entry-pin map centres correctly without geocoding
         coordinates: {
           lat: req.body.lat ?? null,
           lng: req.body.lng ?? null,
@@ -437,6 +421,146 @@ const createBusiness = asyncHandler(async (req, res) => {
 });
 
 /**
+ * @desc  Upsert a global (externally sourced) business into the local CNS
+ *        database and stamp its courier entry pin in one atomic operation.
+ *
+ *        Called when a courier opens a "global" search result and drops an
+ *        entry pin for the first time. After this call the business becomes
+ *        a first-class local record with a real MongoDB _id, and subsequent
+ *        pin edits use the normal PATCH /api/businesses/:id/entry-pin route.
+ *
+ * @route POST /api/businesses/from-global
+ * @access Public (community editable)
+ *
+ * Body:
+ *   placeId      string              (required) external place identifier
+ *   name         string              (required)
+ *   address      string              (required)
+ *   type         string              'Mall' | 'Standalone' | 'Other'
+ *   source       string              'nominatim' | 'manual' | 'foursquare'
+ *   coordinates  { lat, lng } | null
+ *   entryPin     { lat, lng, label, updatedBy }   (required)
+ *
+ * Response: the full Business document (201 on insert, 200 on update)
+ */
+const createFromGlobal = asyncHandler(async (req, res) => {
+  const {
+    placeId,
+    name,
+    address,
+    type,
+    source,
+    coordinates,
+    entryPin,
+  } = req.body;
+
+  // ── Validate ─────────────────────────────────────────────────────────────
+  if (!placeId || typeof placeId !== "string" || !placeId.trim()) {
+    res.status(400);
+    throw new Error("placeId is required");
+  }
+  if (!name || typeof name !== "string" || !name.trim()) {
+    res.status(400);
+    throw new Error("name is required");
+  }
+  if (!address || typeof address !== "string" || !address.trim()) {
+    res.status(400);
+    throw new Error("address is required");
+  }
+  if (!entryPin || entryPin.lat == null || entryPin.lng == null) {
+    res.status(400);
+    throw new Error("entryPin with lat/lng is required");
+  }
+  if (typeof entryPin.lat !== "number" || typeof entryPin.lng !== "number") {
+    res.status(400);
+    throw new Error("entryPin lat and lng must be numbers");
+  }
+
+  const validTypes = ["Mall", "Standalone", "Other"];
+  const safeType = validTypes.includes(type) ? type : "Other";
+
+  const validSources = ["manual", "foursquare", "nominatim"];
+  const safeSource = validSources.includes(source) ? source : "nominatim";
+
+  // ── Build entryPin subdoc ─────────────────────────────────────────────────
+  const pinDoc = {
+    lat: entryPin.lat,
+    lng: entryPin.lng,
+    label: (entryPin.label || "Courier Entry").trim().slice(0, 80),
+    updatedBy: (entryPin.updatedBy || "Anonymous Courier").trim().slice(0, 60),
+    updatedAt: new Date(),
+  };
+
+  // ── Coordinates ───────────────────────────────────────────────────────────
+  const coordsDoc =
+    coordinates?.lat != null && coordinates?.lng != null
+      ? { lat: coordinates.lat, lng: coordinates.lng }
+      : { lat: null, lng: null };
+
+  // ── Upsert by placeId ─────────────────────────────────────────────────────
+  // $setOnInsert fires only when a new document is created.
+  // $set fires on both insert and update — always refreshes pin + coords.
+  let wasInserted = false;
+  try {
+    const doc = await Business.findOneAndUpdate(
+      { placeId: placeId.trim() },
+      {
+        $setOnInsert: {
+          name: name.trim(),
+          address: address.trim(),
+          type: safeType,
+          source: safeSource,
+          totalContributions: 0,
+          isVerified: false,
+          tags: [],
+          contributions: [],
+        },
+        $set: {
+          entryPin: pinDoc,
+          coordinates: coordsDoc,
+        },
+      },
+      {
+        new: true,
+        upsert: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+        // rawResult lets us detect whether it was an insert or an update
+        includeResultMetadata: true,
+      },
+    );
+
+    // Mongoose returns { value: doc, lastErrorObject: { updatedExisting } }
+    // when includeResultMetadata is true
+    const business = doc.value ?? doc;
+    wasInserted = doc.lastErrorObject
+      ? !doc.lastErrorObject.updatedExisting
+      : false;
+
+    console.log(
+      `[from-global] ${wasInserted ? "✨ Created" : "🔄 Updated"} business` +
+      ` "${business.name}" (placeId: ${placeId})`
+    );
+
+    return res.status(wasInserted ? 201 : 200).json(business);
+  } catch (err) {
+    // Race condition: two requests upserted simultaneously → duplicate key
+    if (err.code === 11000) {
+      console.log(`[from-global] Duplicate key race — fetching existing record`);
+      const existing = await Business.findOne({ placeId: placeId.trim() });
+      if (existing) {
+        // Still apply the pin to whichever doc won the race
+        existing.entryPin = pinDoc;
+        existing.coordinates = coordsDoc;
+        await existing.save();
+        return res.status(200).json(existing);
+      }
+    }
+    throw err;
+  }
+});
+
+/**
  * @desc  Save / update / clear the courier entry pin for a business
  * @route PATCH /api/businesses/:id/entry-pin
  * @access Public (community editable)
@@ -483,89 +607,57 @@ const updateEntryPin = asyncHandler(async (req, res) => {
 
 /**
  * Builds a list of progressively simplified address strings to try with Nominatim.
- * Nominatim struggles with unit/shop numbers and mall-style addresses.
- * e.g. "Unit 4, 60 Belmore Rd, Punchbowl NSW 2196"
- *   → ["Unit 4, 60 Belmore Rd, Punchbowl NSW 2196",   // original
- *      "60 Belmore Rd, Punchbowl NSW 2196",            // strip unit prefix
- *      "Belmore Rd, Punchbowl NSW 2196",               // strip street number
- *      "Punchbowl NSW 2196"]                           // suburb + state only
  */
 function buildAddressVariants(address) {
-  const variants = [address]; // always try original first
+  const variants = [address];
 
   const parts = address.split(",").map((p) => p.trim()).filter(Boolean);
 
-  // ── Strip leading mall/centre name ──────────────────────────────────────
-  // "Broadway Shopping Centre K34, K34/1 Bay St, Glebe NSW 2037"
-  //  → "K34/1 Bay St, Glebe NSW 2037"
   if (/shopping\s*cent(re|er)|mall|plaza|arcade|centre/i.test(parts[0])) {
     variants.push(parts.slice(1).join(", "));
   }
 
-  // ── Strip leading unit/shop/level/suite prefix ───────────────────────────
-  // "Unit 4, 60 Belmore Rd" → "60 Belmore Rd"
-  // "Shop 35/32-40 Stockton Ave" → "32-40 Stockton Ave"
   const stripped = address
     .replace(/^(unit|shop|suite|level|lot|apt|apartment|flat|kiosk)\s*[\w\/-]+[,\s]*/i, "")
     .trim();
   if (stripped && stripped !== address) variants.push(stripped);
 
-  // ── Strip street number → just street name + suburb ──────────────────────
   const noNumber = stripped.replace(/^\d+[\w/-]*\s*/, "").trim();
   if (noNumber && noNumber !== stripped) variants.push(noNumber);
 
-  // ── For addresses with a kiosk/shop code before the street ───────────────
-  // "K34/1 Bay St, Glebe NSW 2037" → "1 Bay St, Glebe NSW 2037"
   const noKiosk = stripped.replace(/^[A-Z]\d+\//, "").trim();
   if (noKiosk && noKiosk !== stripped) variants.push(noKiosk);
 
-  // ── Drop postcode, try suburb + state only ────────────────────────────────
-  // Handles Pakistani addresses where postcode isn't in Nominatim
-  // "F-10 Markaz F 10/4 F-10, Islamabad, Pakistan" → "Islamabad, Pakistan"
   if (parts.length > 2) {
-    // second-to-last + last  (suburb/city, country)
     variants.push(parts.slice(-2).join(", "));
-    // just the street + city (skip mall codes)
     const streetPart = parts.find((p) =>
-      /\d/.test(p) && !/^[A-Z]-?\d/.test(p)  // has digits but not a Pakistani sector code
+      /\d/.test(p) && !/^[A-Z]-?\d/.test(p)
     );
     if (streetPart) {
       variants.push([streetPart, ...parts.slice(-2)].join(", "));
     }
   }
 
-  // ── Pakistani sector addresses ────────────────────────────────────────────
-  // "Bhittai Rd, F-7 Markaz F 7 Markaz F-7, Islamabad, Pakistan"
-  // → "Bhittai Rd, Islamabad, Pakistan"
   const roadMatch = address.match(/([A-Za-z\s]+ Rd|[A-Za-z\s]+ St|[A-Za-z\s]+ Ave)/i);
   if (roadMatch) {
     variants.push(`${roadMatch[0].trim()}, ${parts[parts.length - 2]}, ${parts[parts.length - 1]}`);
   }
 
-  // Deduplicate while preserving order
   return [...new Set(variants.filter(Boolean))];
 }
 
 /**
  * @desc  One-time admin utility — backfills coordinates for all businesses
- *        that have coordinates.lat == null by geocoding their address via Nominatim.
  * @route GET /api/businesses/admin/backfill-coordinates?secret=cns-backfill-2024
- * @access Admin only (secret key in query param)
- *
- * USAGE: Hit this URL once from a browser after deploying, then remove the route.
- * Takes ~1.1s per business (Nominatim rate limit). Returns a full JSON report.
+ * @access Admin only
  */
 const backfillCoordinates = async (req, res) => {
   if (req.query.secret !== "cns-backfill-2024") {
     return res.status(403).json({ message: "Forbidden — wrong secret" });
   }
 
-  // Fetch ALL businesses — filter in JS after inspecting actual values.
-  // This catches every possible "missing coords" state: null, 0, undefined,
-  // empty object, or a valid lat that was already geocoded.
   const allBusinesses = await Business.find({}).select("_id name address coordinates");
 
-  // Keep only those that don't have a real non-zero lat/lng
   const businesses = allBusinesses.filter((b) => {
     const lat = b.coordinates?.lat;
     const lng = b.coordinates?.lng;
@@ -573,8 +665,6 @@ const backfillCoordinates = async (req, res) => {
   });
 
   console.log(`[Backfill] Total in DB: ${allBusinesses.length} | Need coords: ${businesses.length}`);
-
-  console.log(`[Backfill] Starting — ${businesses.length} businesses to process`);
 
   const results = {
     totalInDB: allBusinesses.length,
@@ -588,17 +678,10 @@ const backfillCoordinates = async (req, res) => {
   for (let i = 0; i < businesses.length; i++) {
     const b = businesses[i];
 
-    // Re-check — but don't skip if coords are suspiciously round (city-level fallback)
-    // e.g. Cheezious got 33.6938118, 73.0651511 which is Islamabad city centre
     const fresh = await Business.findById(b._id).select("coordinates");
     const freshLat = fresh?.coordinates?.lat;
-    const freshLng = fresh?.coordinates?.lng;
     const isCityLevelOnly =
       freshLat != null &&
-      // coords are already in the businesses array means they came from last run's
-      // "Islamabad, Pakistan" fallback — detect by checking if this business is
-      // one we already processed (it will be in results.details with usedVariant
-      // containing only the last 2 parts of the address)
       results.details.some(
         (d) => d.name === b.name && d.usedVariant && d.usedVariant.split(",").length <= 2
       );
@@ -609,9 +692,6 @@ const backfillCoordinates = async (req, res) => {
     }
 
     try {
-      // Try progressively simplified versions of the address until one geocodes.
-      // This handles: "Unit 4, 60 Belmore Rd" → "60 Belmore Rd, Punchbowl NSW"
-      //               "Shop 35/32-40 Stockton Ave" → "Stockton Ave, Moorebank NSW"
       const addressVariants = buildAddressVariants(b.address);
 
       let found = false;
@@ -642,7 +722,6 @@ const backfillCoordinates = async (req, res) => {
           break;
         }
 
-        // Rate limit between variant attempts too
         await new Promise((r) => setTimeout(r, 1100));
       }
 
@@ -657,7 +736,6 @@ const backfillCoordinates = async (req, res) => {
       console.log(`[Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (${err.message})`);
     }
 
-    // Respect Nominatim's 1 req/sec rate limit
     if (i < businesses.length - 1) {
       await new Promise((r) => setTimeout(r, 1100));
     }
@@ -675,6 +753,7 @@ module.exports = {
   getBusinesses,
   getBusinessDetails,
   createBusiness,
+  createFromGlobal,
   updateEntryPin,
   backfillCoordinates,
 };
