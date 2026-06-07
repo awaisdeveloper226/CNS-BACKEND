@@ -1,8 +1,6 @@
 // backend/models/Instruction.js
-
 const mongoose = require('mongoose');
 
-// Schema for tracking which users have voted and how (Required for Section 5.3 integrity)
 const UserVoteSchema = new mongoose.Schema({
     user: {
         type: mongoose.Schema.Types.ObjectId,
@@ -14,7 +12,7 @@ const UserVoteSchema = new mongoose.Schema({
         enum: ['like', 'dislike'],
         required: true,
     },
-}, { _id: false }); // Do not generate an ID for subdocuments
+}, { _id: false });
 
 const InstructionSchema = new mongoose.Schema({
     business: {
@@ -29,14 +27,12 @@ const InstructionSchema = new mongoose.Schema({
     },
     notes: {
         type: String,
-        required: false, // CHANGED: Made optional since audio can replace text
+        required: false,
     },
-    // NEW: Audio instruction URL
     audioUrl: {
         type: String,
         required: false,
     },
-    // NEW: Audio duration in seconds
     audioDuration: {
         type: Number,
         required: false,
@@ -58,15 +54,13 @@ const InstructionSchema = new mongoose.Schema({
         required: false,
     },
     photos: {
-        type: [String], // URLs for images
+        type: [String],
         default: [],
     },
     videos: {
-        type: [String], // URLs for videos (optional)
+        type: [String],
         default: [],
     },
-    
-    // --- Rating System (Section 5.3) ---
     likes: {
         type: Number,
         default: 0,
@@ -75,32 +69,27 @@ const InstructionSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
-    
-    // Array to prevent duplicate voting and track user's vote history
     votedUsers: {
-        type: [UserVoteSchema], 
+        type: [UserVoteSchema],
         default: [],
     },
-    
     tags: {
-        type: [String], // Array of strings
+        type: [String],
         default: [],
     },
-    
-    // Optional field to link official verified instructions (Section 6.1)
+    // ── Owner / source label ───────────────────────────────────────────────
+    // true  → uploader claimed to be the business owner → "Business Owner" badge
+    // false → regular courier submission → "From Courier" label
     isVerifiedBusinessInstruction: {
         type: Boolean,
         default: false,
     },
-
 }, {
     timestamps: true,
 });
 
-// Create a compound index to ensure a user can only vote on a specific instruction once
 InstructionSchema.index({ 'votedUsers.user': 1 }, { unique: false, sparse: true });
 
-// NEW: Custom validation - ensure either notes OR audioUrl is provided
 InstructionSchema.pre('validate', function(next) {
     if (!this.notes && !this.audioUrl) {
         next(new Error('Either notes or audioUrl must be provided'));
