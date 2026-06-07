@@ -85,6 +85,7 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
             likes: i.likes,
             dislikes: i.dislikes,
             tags: i.tags,
+            isVerifiedBusinessInstruction: i.isVerifiedBusinessInstruction ?? false,
             votedUsers: i.votedUsers.map(v => ({
                 userId: v.user.toString(),
                 voteType: v.voteType,
@@ -128,6 +129,7 @@ const getInstructionById = asyncHandler(async (req, res) => {
         likes: instruction.likes,
         dislikes: instruction.dislikes,
         tags: instruction.tags,
+        isVerifiedBusinessInstruction: instruction.isVerifiedBusinessInstruction ?? false,
         votedUsers: instruction.votedUsers.map(v => ({
             userId: v.user.toString(),
             voteType: v.voteType,
@@ -138,7 +140,20 @@ const getInstructionById = asyncHandler(async (req, res) => {
 });
 
 const createInstruction = asyncHandler(async (req, res) => {
-    const { businessId, notes, audioUrl, audioDuration, type, category, tags, photos = [], videos = [] } = req.body;
+    const {
+        businessId,
+        notes,
+        audioUrl,
+        audioDuration,
+        type,
+        category,
+        tags,
+        photos = [],
+        videos = [],
+        // ── NEW: owner claim flag sent from the frontend checkbox ──────────
+        isVerifiedBusinessInstruction = false,
+    } = req.body;
+
     const userId = req.user._id;
 
     if (!businessId || !type || !category) {
@@ -167,6 +182,8 @@ const createInstruction = asyncHandler(async (req, res) => {
                 tags,
                 photos,
                 videos,
+                // Coerce to boolean so a stray string "false" doesn't slip through
+                isVerifiedBusinessInstruction: isVerifiedBusinessInstruction === true,
             }],
             { session }
         );
@@ -229,19 +246,16 @@ const handleVote = async (req, res, voteAction) => {
         let update = {};
 
         if (voteIndex === -1) {
-            // No existing vote → add it
             update = {
                 $inc: { [voteAction + 's']: 1 },
                 $push: { votedUsers: { user: userId, voteType: voteAction } },
             };
         } else if (instruction.votedUsers[voteIndex].voteType === voteAction) {
-            // Same vote again → toggle off (remove it)
             update = {
                 $inc: { [voteAction + 's']: -1 },
                 $pull: { votedUsers: { user: userId } },
             };
         } else {
-            // Switching vote (like → dislike or vice versa)
             update = {
                 $inc: {
                     [voteAction + 's']: 1,
