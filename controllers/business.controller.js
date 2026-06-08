@@ -20,82 +20,60 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   }
 
   const query = q.trim();
-  console.log("🔍 Nominatim places search for query:", query);
+  console.log("🔍 Google Places search for query:", query);
+
+  if (!GOOGLE_API_KEY) {
+    console.error("❌ Google Places API key missing in environment variables.");
+    return res.status(500).json({ message: "Server configuration error: Missing API Key" });
+  }
 
   try {
-    const url =
-      `https://nominatim.openstreetmap.org/search` +
-      `?q=${encodeURIComponent(query)}` +
-      `&format=json` +
-      `&addressdetails=1` +
-      `&limit=20` +
-      `&dedupe=1`;
+    // Using Google Places API (New) Text Search
+    const url = "https://places.googleapis.com/v1/places:searchText";
 
     const response = await fetch(url, {
+      method: "POST",
       headers: {
-        "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
-        "Accept-Language": "en",
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_API_KEY,
+        // Field mask specifies precisely what parameters we need to save billing costs
+        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.types",
       },
+      body: JSON.stringify({
+        textQuery: query,
+        languageCode: "en",
+      }),
     });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`❌ Nominatim error ${response.status}:`, errText);
-      return res.status(502).json({ message: "Place search failed", detail: errText });
+      console.error(`❌ Google Places error ${response.status}:`, errText);
+      return res.status(502).json({ message: "Global place search failed", detail: errText });
     }
 
-    const places = await response.json();
-    console.log(`✅ Nominatim returned ${places.length} results`);
+    const data = await response.json();
+    const places = data.places || [];
+    console.log(`✅ Google Places returned ${places.length} results`);
 
+    // Map Google SDK models straight into the client app's standard contract
     const results = places.map((place) => {
-      const addr = place.address || {};
-
-      const addressParts = [
-        addr.road || addr.pedestrian || addr.footway,
-        addr.suburb || addr.neighbourhood || addr.quarter,
-        addr.city || addr.town || addr.village || addr.county,
-        addr.state,
-        addr.country,
-      ].filter(Boolean);
-
-      const formattedAddress =
-        addressParts.length > 0
-          ? addressParts.join(", ")
-          : place.display_name || "Address not available";
-
-      const name =
-        place.name ||
-        addr.amenity ||
-        addr.shop ||
-        addr.tourism ||
-        place.display_name.split(",")[0];
-
       return {
-        placeId: `osm_${place.osm_type}_${place.osm_id}`,
-        name: name.trim(),
-        address: formattedAddress,
-        source: "nominatim",
+        // Retain standard osm prefix parsing or make it generic for Google keys
+        placeId: place.id, 
+        name: place.displayName?.text || "Unknown Name",
+        address: place.formattedAddress || "Address not available",
+        source: "google",
         type: "Standalone",
         totalContributions: 0,
         isVerified: false,
-        lat: parseFloat(place.lat),
-        lng: parseFloat(place.lon),
+        lat: place.location?.latitude ?? null,
+        lng: place.location?.longitude ?? null,
       };
     });
 
-    const GEOGRAPHIC_CLASSES = new Set([
-      "boundary", "place", "highway", "waterway",
-      "natural", "landuse", "railway", "aeroway",
-    ]);
-
-    const filtered = results.filter((r, idx) => {
-      const cls = places[idx]?.class;
-      return !GEOGRAPHIC_CLASSES.has(cls);
-    });
-
-    return res.status(200).json(filtered.length > 0 ? filtered : results);
+    return res.status(200).json(results);
   } catch (error) {
-    console.error("❌ Nominatim fetch error:", error);
+    console.error("❌ Google Places fetch error:", error);
     return res.status(502).json({ message: "Place search service error" });
   }
 });
