@@ -324,6 +324,7 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
       userId: instr.user?._id?.toString() || "unknown",
       userName: instr.user?.name || "Anonymous User",
       userLevel: instr.user?.level || 1,
+      isVerifiedBusinessInstruction: instr.isVerifiedBusinessInstruction ?? false,
       votedUsers: (instr.votedUsers || []).map((vote) => ({
         userId: vote.user?.toString() || vote.user,
         voteType: vote.voteType,
