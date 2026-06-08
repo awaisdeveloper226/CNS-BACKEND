@@ -7,6 +7,11 @@ const Comment = require("../models/Comment");
 
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
+const normaliseSource = (raw) => {
+  const VALID = ["manual", "foursquare", "nominatim"];
+  return VALID.includes(raw) ? raw : "nominatim";
+};
+
 /**
  * @desc  Search places via Nominatim (OpenStreetMap) — free, no API key required
  * @route GET /api/businesses/places-search?q=KFC+Lahore
@@ -338,7 +343,7 @@ const createBusiness = asyncHandler(async (req, res) => {
         name,
         address,
         type: type || "Standalone",
-        source: source || "nominatim",
+        source: normaliseSource(source),
         placeId,
         tags: courierType ? [courierType] : [],
         coordinates: {
@@ -458,8 +463,7 @@ const createFromGlobal = asyncHandler(async (req, res) => {
   const validTypes = ["Mall", "Standalone", "Other"];
   const safeType = validTypes.includes(type) ? type : "Other";
 
-  const validSources = ["manual", "foursquare", "nominatim"];
-  const safeSource = validSources.includes(source) ? source : "nominatim";
+  const safeSource = normaliseSource(source);
 
   // ── Build entryPin subdoc ─────────────────────────────────────────────────
   const pinDoc = {
