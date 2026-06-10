@@ -730,6 +730,82 @@ const backfillCoordinates = async (req, res) => {
   return res.status(200).json(results);
 };
 
+
+const backfillCoordinatesGoogle = async (req, res) => {
+  if (req.query.secret !== "cns-backfill-2024") {
+    return res.status(403).json({ message: "Forbidden — wrong secret" });
+  }
+
+  if (!GOOGLE_API_KEY) {
+    return res.status(500).json({ message: "GOOGLE_PLACES_API_KEY not set on server" });
+  }
+
+  // ?force=true  → re-geocode ALL businesses (even those with existing coords)
+  // default      → only businesses missing coords
+  const forceAll = req.query.force === "true";
+
+  const allBusinesses = await Business.find({}).select("_id name address coordinates");
+
+  const businesses = forceAll
+    ? allBusinesses
+    : allBusinesses.filter((b) => !b.coordinates?.lat || !b.coordinates?.lng);
+
+  console.log(`[Google Backfill] Total in DB: ${allBusinesses.length} | To geocode: ${businesses.length}`);
+
+  const results = {
+    totalInDB: allBusinesses.length,
+    toGeocode: businesses.length,
+    success: 0,
+    failed: 0,
+    details: [],
+  };
+
+  for (let i = 0; i < businesses.length; i++) {
+    const b = businesses[i];
+    try {
+      const url =
+        `https://maps.googleapis.com/maps/api/geocode/json` +
+        `?address=${encodeURIComponent(b.address)}&key=${GOOGLE_API_KEY}`;
+
+      const geoRes = await fetch(url);
+      const geoData = await geoRes.json();
+
+      if (geoData.status === "OK" && geoData.results?.[0]) {
+        const loc = geoData.results[0].geometry.location;
+        await Business.findByIdAndUpdate(b._id, {
+          "coordinates.lat": loc.lat,
+          "coordinates.lng": loc.lng,
+        });
+        results.success++;
+        results.details.push({ name: b.name, status: "ok", lat: loc.lat, lng: loc.lng });
+        console.log(`[Google Backfill] ✓ ${i + 1}/${businesses.length} — ${b.name}`);
+      } else {
+        results.failed++;
+        results.details.push({ name: b.name, address: b.address, status: "failed", reason: geoData.status });
+        console.log(`[Google Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (${geoData.status})`);
+      }
+    } catch (err) {
+      results.failed++;
+      results.details.push({ name: b.name, status: "error", error: err.message });
+      console.log(`[Google Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (${err.message})`);
+    }
+
+    // 100ms delay — safely under Google's 50 req/s limit
+    if (i < businesses.length - 1) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  console.log(`[Google Backfill] Done — success:${results.success} failed:${results.failed}`);
+  return res.status(200).json(results);
+};
+
+
+
+
+
+
+
 module.exports = {
   searchFoursquarePlaces,
   reverseGeocode,
@@ -738,5 +814,6 @@ module.exports = {
   createBusiness,
   createFromGlobal,
   updateEntryPin,
+  backfillCoordinatesGoogle
   backfillCoordinates,
 };
