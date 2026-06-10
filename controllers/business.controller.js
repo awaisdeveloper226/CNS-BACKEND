@@ -6,6 +6,7 @@ const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
+const GOOGLE_AHMED_KEY_FOR_GEOCODING=process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING
 
 const normaliseSource = (raw) => {
   const VALID = ["manual", "foursquare", "nominatim"];
@@ -636,18 +637,18 @@ const backfillCoordinatesGoogle = async (req, res) => {
     return res.status(403).json({ message: "Forbidden — wrong secret" });
   }
 
-  if (!GOOGLE_API_KEY) {
-    return res.status(500).json({ message: "GOOGLE_PLACES_API_KEY not set on server" });
+  if (!GOOGLE_AHMED_KEY_FOR_GEOCODING) {
+    return res.status(500).json({ message: "GOOGLE_AHMED_KEY_FOR_GEOCODING not set on server" });
   }
 
   // Log the key prefix so we can verify which key is being used (never log full key)
-  console.log(`[Google Backfill] Using API key starting with: ${GOOGLE_API_KEY.slice(0, 8)}...`);
-  console.log(`[Google Backfill] Key length: ${GOOGLE_API_KEY.length}`);
+  console.log(`[Google Backfill] Using API key starting with: ${GOOGLE_AHMED_KEY_FOR_GEOCODING.slice(0, 8)}...`);
+  console.log(`[Google Backfill] Key length: ${GOOGLE_AHMED_KEY_FOR_GEOCODING.length}`);
 
   // Test the key with a single known address before running the full backfill
   console.log(`[Google Backfill] Running key test...`);
   try {
-    const testUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=Sydney+Australia&key=${GOOGLE_API_KEY}`;
+    const testUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=Sydney+Australia&key=${GOOGLE_AHMED_KEY_FOR_GEOCODING}`;
     const testRes = await fetch(testUrl);
     const testData = await testRes.json();
     console.log(`[Google Backfill] Key test status: ${testData.status}`);
@@ -658,7 +659,7 @@ const backfillCoordinatesGoogle = async (req, res) => {
         message: "API key test failed — aborting backfill",
         status: testData.status,
         error_message: testData.error_message || null,
-        key_prefix: GOOGLE_API_KEY.slice(0, 8),
+        key_prefix: GOOGLE_AHMED_KEY_FOR_GEOCODING.slice(0, 8),
       });
     }
     console.log(`[Google Backfill] Key test passed ✓`);
@@ -680,7 +681,7 @@ const backfillCoordinatesGoogle = async (req, res) => {
   const results = {
     totalInDB: allBusinesses.length,
     toGeocode: businesses.length,
-    keyPrefix: GOOGLE_API_KEY.slice(0, 8),
+    keyPrefix: GOOGLE_AHMED_KEY_FOR_GEOCODING.slice(0, 8),
     success: 0,
     failed: 0,
     details: [],
@@ -689,7 +690,7 @@ const backfillCoordinatesGoogle = async (req, res) => {
   for (let i = 0; i < businesses.length; i++) {
     const b = businesses[i];
     try {
-      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(b.address)}&key=${GOOGLE_API_KEY}`;
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(b.address)}&key=${GOOGLE_AHMED_KEY_FOR_GEOCODING}`;
       console.log(`[Google Backfill] ${i + 1}/${businesses.length} — fetching: "${b.address}"`);
 
       const geoRes = await fetch(url);
