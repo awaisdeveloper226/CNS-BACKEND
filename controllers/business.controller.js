@@ -640,12 +640,37 @@ const backfillCoordinatesGoogle = async (req, res) => {
     return res.status(500).json({ message: "GOOGLE_PLACES_API_KEY not set on server" });
   }
 
-  // ?force=true  → re-geocode ALL businesses (even those with existing coords)
-  // default      → only businesses missing coords
+  // Log the key prefix so we can verify which key is being used (never log full key)
+  console.log(`[Google Backfill] Using API key starting with: ${GOOGLE_API_KEY.slice(0, 8)}...`);
+  console.log(`[Google Backfill] Key length: ${GOOGLE_API_KEY.length}`);
+
+  // Test the key with a single known address before running the full backfill
+  console.log(`[Google Backfill] Running key test...`);
+  try {
+    const testUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=Sydney+Australia&key=${GOOGLE_API_KEY}`;
+    const testRes = await fetch(testUrl);
+    const testData = await testRes.json();
+    console.log(`[Google Backfill] Key test status: ${testData.status}`);
+    console.log(`[Google Backfill] Key test error_message: ${testData.error_message || "none"}`);
+
+    if (testData.status !== "OK") {
+      return res.status(500).json({
+        message: "API key test failed — aborting backfill",
+        status: testData.status,
+        error_message: testData.error_message || null,
+        key_prefix: GOOGLE_API_KEY.slice(0, 8),
+      });
+    }
+    console.log(`[Google Backfill] Key test passed ✓`);
+  } catch (err) {
+    return res.status(500).json({
+      message: "Key test fetch failed",
+      error: err.message,
+    });
+  }
+
   const forceAll = req.query.force === "true";
-
   const allBusinesses = await Business.find({}).select("_id name address coordinates");
-
   const businesses = forceAll
     ? allBusinesses
     : allBusinesses.filter((b) => !b.coordinates?.lat || !b.coordinates?.lng);
@@ -655,6 +680,7 @@ const backfillCoordinatesGoogle = async (req, res) => {
   const results = {
     totalInDB: allBusinesses.length,
     toGeocode: businesses.length,
+    keyPrefix: GOOGLE_API_KEY.slice(0, 8),
     success: 0,
     failed: 0,
     details: [],
@@ -663,12 +689,23 @@ const backfillCoordinatesGoogle = async (req, res) => {
   for (let i = 0; i < businesses.length; i++) {
     const b = businesses[i];
     try {
-      const url =
-        `https://maps.googleapis.com/maps/api/geocode/json` +
-        `?address=${encodeURIComponent(b.address)}&key=${GOOGLE_API_KEY}`;
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(b.address)}&key=${GOOGLE_API_KEY}`;
+      console.log(`[Google Backfill] ${i + 1}/${businesses.length} — fetching: "${b.address}"`);
 
       const geoRes = await fetch(url);
-      const geoData = await geoRes.json();
+      const rawText = await geoRes.text(); // read as text first so we can log it on error
+
+      let geoData;
+      try {
+        geoData = JSON.parse(rawText);
+      } catch (parseErr) {
+        console.error(`[Google Backfill] ✗ JSON parse failed for "${b.name}": ${rawText.slice(0, 200)}`);
+        results.failed++;
+        results.details.push({ name: b.name, status: "parse_error", raw: rawText.slice(0, 200) });
+        continue;
+      }
+
+      console.log(`[Google Backfill] Response status: ${geoData.status} | error_message: ${geoData.error_message || "none"}`);
 
       if (geoData.status === "OK" && geoData.results?.[0]) {
         const loc = geoData.results[0].geometry.location;
@@ -678,19 +715,24 @@ const backfillCoordinatesGoogle = async (req, res) => {
         });
         results.success++;
         results.details.push({ name: b.name, status: "ok", lat: loc.lat, lng: loc.lng });
-        console.log(`[Google Backfill] ✓ ${i + 1}/${businesses.length} — ${b.name}`);
+        console.log(`[Google Backfill] ✓ ${b.name} → ${loc.lat}, ${loc.lng}`);
       } else {
         results.failed++;
-        results.details.push({ name: b.name, address: b.address, status: "failed", reason: geoData.status });
-        console.log(`[Google Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (${geoData.status})`);
+        results.details.push({
+          name: b.name,
+          address: b.address,
+          status: "failed",
+          reason: geoData.status,
+          error_message: geoData.error_message || null,
+        });
+        console.log(`[Google Backfill] ✗ ${b.name} — status: ${geoData.status}, error: ${geoData.error_message || "none"}`);
       }
     } catch (err) {
       results.failed++;
       results.details.push({ name: b.name, status: "error", error: err.message });
-      console.log(`[Google Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (${err.message})`);
+      console.error(`[Google Backfill] ✗ ${b.name} — exception: ${err.message}`);
     }
 
-    // 100ms delay — safely under Google's 50 req/s limit
     if (i < businesses.length - 1) {
       await new Promise((r) => setTimeout(r, 100));
     }
