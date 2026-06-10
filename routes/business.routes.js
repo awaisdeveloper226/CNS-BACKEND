@@ -11,7 +11,6 @@ const {
   createBusiness,
   createFromGlobal,
   updateEntryPin,
-  backfillCoordinates,
   backfillCoordinatesGoogle
 } = require('../controllers/business.controller');
 
@@ -21,13 +20,10 @@ router.get('/geocode', reverseGeocode);
 
 // ── ONE-TIME ADMIN UTILITY ────────────────────────────────────────────────────
 // After running, remove this line and redeploy.
-router.get('/admin/backfill-coordinates', backfillCoordinates);
 
 // ── GLOBAL → LOCAL UPSERT ─────────────────────────────────────────────────────
 // Must be before /:id so Express doesn't treat "from-global" as a business ID.
 router.post('/from-global', createFromGlobal);
-
-
 
 router.get('/admin/backfill-coordinates-google', backfillCoordinatesGoogle);  // ← add this
 
