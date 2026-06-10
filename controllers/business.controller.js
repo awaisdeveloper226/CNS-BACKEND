@@ -629,106 +629,6 @@ function buildAddressVariants(address) {
   return [...new Set(variants.filter(Boolean))];
 }
 
-/**
- * @desc  One-time admin utility — backfills coordinates for all businesses
- * @route GET /api/businesses/admin/backfill-coordinates?secret=cns-backfill-2024
- * @access Admin only
- */
-const backfillCoordinates = async (req, res) => {
-  if (req.query.secret !== "cns-backfill-2024") {
-    return res.status(403).json({ message: "Forbidden — wrong secret" });
-  }
-
-  const allBusinesses = await Business.find({}).select("_id name address coordinates");
-
-  const businesses = allBusinesses.filter((b) => {
-    const lat = b.coordinates?.lat;
-    const lng = b.coordinates?.lng;
-    return !lat || !lng || lat === 0 || lng === 0;
-  });
-
-  console.log(`[Backfill] Total in DB: ${allBusinesses.length} | Need coords: ${businesses.length}`);
-
-  const results = {
-    totalInDB: allBusinesses.length,
-    totalNeedingCoords: businesses.length,
-    success: 0,
-    failed: 0,
-    skipped: 0,
-    details: [],
-  };
-
-  for (let i = 0; i < businesses.length; i++) {
-    const b = businesses[i];
-
-    const fresh = await Business.findById(b._id).select("coordinates");
-    const freshLat = fresh?.coordinates?.lat;
-    const isCityLevelOnly =
-      freshLat != null &&
-      results.details.some(
-        (d) => d.name === b.name && d.usedVariant && d.usedVariant.split(",").length <= 2
-      );
-    if (freshLat != null && !isCityLevelOnly) {
-      results.skipped++;
-      results.details.push({ name: b.name, status: "skipped" });
-      continue;
-    }
-
-    try {
-      const addressVariants = buildAddressVariants(b.address);
-
-      let found = false;
-      for (const variant of addressVariants) {
-        const url =
-          `https://nominatim.openstreetmap.org/search` +
-          `?q=${encodeURIComponent(variant)}&format=json&limit=1`;
-
-        const geoRes = await fetch(url, {
-          headers: {
-            "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
-            "Accept-Language": "en",
-          },
-        });
-        const geoData = await geoRes.json();
-
-        if (geoData?.[0]) {
-          const lat = parseFloat(geoData[0].lat);
-          const lng = parseFloat(geoData[0].lon);
-          await Business.findByIdAndUpdate(b._id, {
-            "coordinates.lat": lat,
-            "coordinates.lng": lng,
-          });
-          results.success++;
-          results.details.push({ name: b.name, status: "ok", lat, lng, usedVariant: variant });
-          console.log(`[Backfill] ✓ ${i + 1}/${businesses.length} — ${b.name} (via: "${variant}")`);
-          found = true;
-          break;
-        }
-
-        await new Promise((r) => setTimeout(r, 1100));
-      }
-
-      if (!found) {
-        results.failed++;
-        results.details.push({ name: b.name, address: b.address, status: "not found" });
-        console.log(`[Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (not found)`);
-      }
-    } catch (err) {
-      results.failed++;
-      results.details.push({ name: b.name, status: "error", error: err.message });
-      console.log(`[Backfill] ✗ ${i + 1}/${businesses.length} — ${b.name} (${err.message})`);
-    }
-
-    if (i < businesses.length - 1) {
-      await new Promise((r) => setTimeout(r, 1100));
-    }
-  }
-
-  console.log(
-    `[Backfill] Done — success:${results.success} failed:${results.failed} skipped:${results.skipped}`
-  );
-  return res.status(200).json(results);
-};
 
 
 const backfillCoordinatesGoogle = async (req, res) => {
@@ -801,11 +701,6 @@ const backfillCoordinatesGoogle = async (req, res) => {
 };
 
 
-
-
-
-
-
 module.exports = {
   searchFoursquarePlaces,
   reverseGeocode,
@@ -814,6 +709,5 @@ module.exports = {
   createBusiness,
   createFromGlobal,
   updateEntryPin,
-  backfillCoordinatesGoogle
-  backfillCoordinates,
+  backfillCoordinatesGoogle,
 };
