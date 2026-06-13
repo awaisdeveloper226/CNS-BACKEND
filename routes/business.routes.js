@@ -12,10 +12,8 @@ const {
   createFromGlobal,
   updateEntryPin,
   backfillCoordinatesGoogle,
-  getSearchHistory,
-  addSearchHistory,
-  clearSearchHistory,
-  getNearbyBusinesses
+  getSearchHistory, addSearchHistory
+  
 } = require('../controllers/business.controller');
 
 // ── IMPORTANT: specific GET routes MUST be declared before /:id ──────────────
@@ -29,6 +27,9 @@ router.get('/geocode', reverseGeocode);
 // Must be before /:id so Express doesn't treat "from-global" as a business ID.
 router.post('/from-global', createFromGlobal);
 
+router.get ("/search-history", protect, getSearchHistory);
+router.post("/search-history", protect, addSearchHistory);
+
 router.get('/admin/backfill-coordinates-google', backfillCoordinatesGoogle);  // ← add this
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,12 +37,6 @@ router.get('/admin/backfill-coordinates-google', backfillCoordinatesGoogle);  //
 router.get('/', getBusinesses);
 router.get('/:id', getBusinessDetails);
 
-
-router.get("/users/search-history", protect, getSearchHistory);
-router.post("/users/search-history", protect, addSearchHistory);
-router.delete("/users/search-history", protect, clearSearchHistory);
-
-router.get("/businesses/nearby", getNearbyBusinesses);
 
 // Create business (authenticated)
 router.post('/', uploadKeyOrProtect, createBusiness);
