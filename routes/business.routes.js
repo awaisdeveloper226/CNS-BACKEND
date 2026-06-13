@@ -12,7 +12,8 @@ const {
   createFromGlobal,
   updateEntryPin,
   backfillCoordinatesGoogle,
-  getSearchHistory, addSearchHistory
+  getSearchHistory, addSearchHistory,
+  getNearbyBusinesses
   
 } = require('../controllers/business.controller');
 
@@ -29,6 +30,7 @@ router.post('/from-global', createFromGlobal);
 
 router.get ("/search-history", protect, getSearchHistory);
 router.post("/search-history", protect, addSearchHistory);
+router.get("/nearby", getNearbyBusinesses);
 
 router.get('/admin/backfill-coordinates-google', backfillCoordinatesGoogle);  // ← add this
 
