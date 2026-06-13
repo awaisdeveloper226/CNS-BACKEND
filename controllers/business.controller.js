@@ -826,73 +826,111 @@ const getNearbyBusinesses = asyncHandler(async (req, res) => {
 
   const parsedLat = parseFloat(lat);
   const parsedLng = parseFloat(lng);
-  const parsedLimit = parseInt(limit, 10) || 8;
+  const parsedLimit = Math.min(parseInt(limit, 10) || 8, 20);
 
   if (isNaN(parsedLat) || isNaN(parsedLng)) {
     return res.status(400).json({ message: "lat and lng must be valid numbers" });
   }
 
-  // $nearSphere requires a 2dsphere index on coordinates.
-  // Falls back to a simple find + manual distance sort if the query fails
-  // (e.g. index not yet created) so the app never hard-crashes.
-  try {
-    const businesses = await Business.find({
-      "coordinates.lat": { $ne: null },
-      "coordinates.lng": { $ne: null },
-      location: {
-        $nearSphere: {
-          $geometry: {
-            type: "Point",
-            coordinates: [parsedLng, parsedLat], // MongoDB: [lng, lat]
-          },
-          $maxDistance: 10000, // 10 km radius
-        },
-      },
-    }).limit(parsedLimit);
+  if (!GOOGLE_API_KEY) {
+    return res.status(500).json({ message: "Server configuration error: Missing API Key" });
+  }
 
-    const withDistance = businesses.map((b) => {
-      const dLat = (b.coordinates.lat - parsedLat) * (Math.PI / 180);
-      const dLng = (b.coordinates.lng - parsedLng) * (Math.PI / 180);
+  try {
+    const response = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_API_KEY,
+        "X-Goog-FieldMask":
+          "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.businessStatus",
+      },
+      body: JSON.stringify({
+        locationRestriction: {
+          circle: {
+            center: { latitude: parsedLat, longitude: parsedLng },
+            radius: 1000.0, // 1 km — tight radius, these are "right near you" results
+          },
+        },
+        // Only return places that are actually open businesses, not parks/roads etc.
+        includedTypes: [
+          "store",
+          "restaurant",
+          "food",
+          "shopping_mall",
+          "supermarket",
+          "pharmacy",
+          "bank",
+          "hospital",
+          "gym",
+          "cafe",
+          "clothing_store",
+          "convenience_store",
+          "department_store",
+          "electronics_store",
+          "furniture_store",
+          "home_goods_store",
+          "jewelry_store",
+          "shoe_store",
+          "bakery",
+          "fast_food_restaurant",
+        ],
+        maxResultCount: parsedLimit,
+        languageCode: "en",
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`❌ Google Nearby error ${response.status}:`, errText);
+      return res.status(502).json({ message: "Nearby search failed" });
+    }
+
+    const data = await response.json();
+    const places = data.places || [];
+    console.log(`✅ Google Nearby returned ${places.length} results for (${parsedLat}, ${parsedLng})`);
+
+    // Map to the same contract the frontend expects for NearbyBusiness,
+    // which extends Business and adds _distanceKm
+    const results = places.map((place) => {
+      const placeLat = place.location?.latitude ?? parsedLat;
+      const placeLng = place.location?.longitude ?? parsedLng;
+
+      // Haversine distance
+      const dLat = (placeLat - parsedLat) * (Math.PI / 180);
+      const dLng = (placeLng - parsedLng) * (Math.PI / 180);
       const a =
         Math.sin(dLat / 2) ** 2 +
         Math.cos(parsedLat * (Math.PI / 180)) *
-          Math.cos(b.coordinates.lat * (Math.PI / 180)) *
+          Math.cos(placeLat * (Math.PI / 180)) *
           Math.sin(dLng / 2) ** 2;
-      const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      return { ...b.toObject(), _distanceKm: Math.round(distanceKm * 10) / 10 };
+      const distanceKm =
+        Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+
+      return {
+        placeId: place.id,
+        name: place.displayName?.text || "Unknown",
+        address: place.formattedAddress || "Address not available",
+        source: "google",
+        type: "Standalone",
+        totalContributions: 0,
+        isVerified: false,
+        lat: placeLat,
+        lng: placeLng,
+        _distanceKm: distanceKm,
+        _fromFoursquare: true, // marks it as global so the frontend handles it correctly
+      };
     });
 
-    return res.status(200).json(withDistance);
-  } catch (err) {
-    // Index missing — fall back to manual haversine sort across all businesses
-    // with known coordinates (capped at 500 for performance)
-    console.warn("[Nearby] $nearSphere failed, falling back to manual sort:", err.message);
+    // Sort by distance — Google Nearby doesn't guarantee distance order
+    results.sort((a, b) => a._distanceKm - b._distanceKm);
 
-    const all = await Business.find({
-      "coordinates.lat": { $ne: null },
-      "coordinates.lng": { $ne: null },
-    }).limit(500);
-
-    const withDistance = all
-      .map((b) => {
-        const dLat = (b.coordinates.lat - parsedLat) * (Math.PI / 180);
-        const dLng = (b.coordinates.lng - parsedLng) * (Math.PI / 180);
-        const a =
-          Math.sin(dLat / 2) ** 2 +
-          Math.cos(parsedLat * (Math.PI / 180)) *
-            Math.cos(b.coordinates.lat * (Math.PI / 180)) *
-            Math.sin(dLng / 2) ** 2;
-        const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return { ...b.toObject(), _distanceKm: Math.round(distanceKm * 10) / 10 };
-      })
-      .filter((b) => b._distanceKm <= 10)
-      .sort((a, b) => a._distanceKm - b._distanceKm)
-      .slice(0, parsedLimit);
-
-    return res.status(200).json(withDistance);
+    return res.status(200).json(results);
+  } catch (error) {
+    console.error("❌ Google Nearby fetch error:", error);
+    return res.status(502).json({ message: "Nearby search service error" });
   }
 });
-
 
 
 
