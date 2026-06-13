@@ -15,6 +15,7 @@ const {
   getSearchHistory,
   addSearchHistory,
   clearSearchHistory,
+  getNearbyBusinesses
 } = require('../controllers/business.controller');
 
 // ── IMPORTANT: specific GET routes MUST be declared before /:id ──────────────
@@ -40,6 +41,7 @@ router.get("/users/search-history", protect, getSearchHistory);
 router.post("/users/search-history", protect, addSearchHistory);
 router.delete("/users/search-history", protect, clearSearchHistory);
 
+router.get("/businesses/nearby", getNearbyBusinesses);
 
 // Create business (authenticated)
 router.post('/', uploadKeyOrProtect, createBusiness);
