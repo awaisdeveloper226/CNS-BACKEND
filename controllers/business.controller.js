@@ -6,7 +6,7 @@ const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 const User = require("../models/User");
 
-const GOOGLE_API_KEY = process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
+const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 const GOOGLE_AHMED_KEY_FOR_GEOCODING=process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
 const MAX_HISTORY = 5;
 
@@ -814,6 +814,95 @@ const addSearchHistory = asyncHandler(async (req, res) => {
   res.status(200).json({ message: "Search history updated" });
 });
 
+
+
+
+const getNearbyBusinesses = asyncHandler(async (req, res) => {
+  const { lat, lng, limit } = req.query;
+
+  if (!lat || !lng) {
+    return res.status(400).json({ message: "lat and lng are required" });
+  }
+
+  const parsedLat = parseFloat(lat);
+  const parsedLng = parseFloat(lng);
+  const parsedLimit = parseInt(limit, 10) || 8;
+
+  if (isNaN(parsedLat) || isNaN(parsedLng)) {
+    return res.status(400).json({ message: "lat and lng must be valid numbers" });
+  }
+
+  // $nearSphere requires a 2dsphere index on coordinates.
+  // Falls back to a simple find + manual distance sort if the query fails
+  // (e.g. index not yet created) so the app never hard-crashes.
+  try {
+    const businesses = await Business.find({
+      "coordinates.lat": { $ne: null },
+      "coordinates.lng": { $ne: null },
+      location: {
+        $nearSphere: {
+          $geometry: {
+            type: "Point",
+            coordinates: [parsedLng, parsedLat], // MongoDB: [lng, lat]
+          },
+          $maxDistance: 10000, // 10 km radius
+        },
+      },
+    }).limit(parsedLimit);
+
+    const withDistance = businesses.map((b) => {
+      const dLat = (b.coordinates.lat - parsedLat) * (Math.PI / 180);
+      const dLng = (b.coordinates.lng - parsedLng) * (Math.PI / 180);
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(parsedLat * (Math.PI / 180)) *
+          Math.cos(b.coordinates.lat * (Math.PI / 180)) *
+          Math.sin(dLng / 2) ** 2;
+      const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return { ...b.toObject(), _distanceKm: Math.round(distanceKm * 10) / 10 };
+    });
+
+    return res.status(200).json(withDistance);
+  } catch (err) {
+    // Index missing — fall back to manual haversine sort across all businesses
+    // with known coordinates (capped at 500 for performance)
+    console.warn("[Nearby] $nearSphere failed, falling back to manual sort:", err.message);
+
+    const all = await Business.find({
+      "coordinates.lat": { $ne: null },
+      "coordinates.lng": { $ne: null },
+    }).limit(500);
+
+    const withDistance = all
+      .map((b) => {
+        const dLat = (b.coordinates.lat - parsedLat) * (Math.PI / 180);
+        const dLng = (b.coordinates.lng - parsedLng) * (Math.PI / 180);
+        const a =
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(parsedLat * (Math.PI / 180)) *
+            Math.cos(b.coordinates.lat * (Math.PI / 180)) *
+            Math.sin(dLng / 2) ** 2;
+        const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return { ...b.toObject(), _distanceKm: Math.round(distanceKm * 10) / 10 };
+      })
+      .filter((b) => b._distanceKm <= 10)
+      .sort((a, b) => a._distanceKm - b._distanceKm)
+      .slice(0, parsedLimit);
+
+    return res.status(200).json(withDistance);
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
 module.exports = {
   searchFoursquarePlaces,
   reverseGeocode,
@@ -824,4 +913,5 @@ module.exports = {
   updateEntryPin,
   backfillCoordinatesGoogle,
   getSearchHistory, addSearchHistory,
+  getNearbyBusinesses, 
 };
