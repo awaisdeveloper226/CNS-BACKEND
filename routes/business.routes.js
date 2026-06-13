@@ -11,7 +11,10 @@ const {
   createBusiness,
   createFromGlobal,
   updateEntryPin,
-  backfillCoordinatesGoogle
+  backfillCoordinatesGoogle,
+  getSearchHistory,
+  addSearchHistory,
+  clearSearchHistory,
 } = require('../controllers/business.controller');
 
 // ── IMPORTANT: specific GET routes MUST be declared before /:id ──────────────
@@ -31,6 +34,12 @@ router.get('/admin/backfill-coordinates-google', backfillCoordinatesGoogle);  //
 // Public routes
 router.get('/', getBusinesses);
 router.get('/:id', getBusinessDetails);
+
+
+router.get("/users/search-history", protect, getSearchHistory);
+router.post("/users/search-history", protect, addSearchHistory);
+router.delete("/users/search-history", protect, clearSearchHistory);
+
 
 // Create business (authenticated)
 router.post('/', uploadKeyOrProtect, createBusiness);
