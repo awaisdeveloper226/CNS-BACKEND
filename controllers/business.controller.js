@@ -4,6 +4,7 @@ const asyncHandler = require("express-async-handler");
 const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
+const User = require("../models/User");
 
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 const GOOGLE_AHMED_KEY_FOR_GEOCODING=process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING
@@ -744,6 +745,81 @@ const backfillCoordinatesGoogle = async (req, res) => {
 };
 
 
+const getSearchHistory = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id).select("searchHistory");
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  // Already stored newest-first; just return the queries
+  const history = (user.searchHistory || []).map((h) => h.query);
+
+  res.status(200).json({ history });
+});
+
+const addSearchHistory = asyncHandler(async (req, res) => {
+  const { query } = req.body;
+
+  if (!query || !query.trim()) {
+    res.status(400);
+    throw new Error("query is required");
+  }
+
+  const trimmed = query.trim();
+
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  // Remove any existing identical entry (case-insensitive) so it moves to the top
+  user.searchHistory = (user.searchHistory || []).filter(
+    (h) => h.query.toLowerCase() !== trimmed.toLowerCase()
+  );
+
+  // Insert at the front
+  user.searchHistory.unshift({ query: trimmed, searchedAt: new Date() });
+
+  // Keep only the last 5
+  user.searchHistory = user.searchHistory.slice(0, 5);
+
+  await user.save();
+
+  res.status(200).json({
+    history: user.searchHistory.map((h) => h.query),
+  });
+});
+
+/**
+ * @desc  Clear the current user's search history
+ * @route DELETE /api/users/search-history
+ * @access Private
+ */
+const clearSearchHistory = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+
+  user.searchHistory = [];
+  await user.save();
+
+  res.status(200).json({ history: [] });
+});
+
+
+
+
+
+
+
+
+
+
 module.exports = {
   searchFoursquarePlaces,
   reverseGeocode,
@@ -753,4 +829,7 @@ module.exports = {
   createFromGlobal,
   updateEntryPin,
   backfillCoordinatesGoogle,
+  getSearchHistory,
+  addSearchHistory,
+  clearSearchHistory,
 };
