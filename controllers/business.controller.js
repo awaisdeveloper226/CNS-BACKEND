@@ -6,7 +6,7 @@ const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 const User = require("../models/User");
 
-const GOOGLE_API_KEY = process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
+const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 const GOOGLE_AHMED_KEY_FOR_GEOCODING=process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
 const MAX_HISTORY = 5;
 
