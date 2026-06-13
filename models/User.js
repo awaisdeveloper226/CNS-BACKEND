@@ -2,6 +2,14 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+const SearchHistorySchema = new mongoose.Schema(
+  {
+    query: { type: String, required: true, trim: true },
+    searchedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const UserSchema = new mongoose.Schema(
   {
     name: {
@@ -33,11 +41,11 @@ const UserSchema = new mongoose.Schema(
     contributions:       { type: Number, default: 0 },
     totalLikesReceived:  { type: Number, default: 0 },
     badges:              { type: [String], default: [] },
-
+    // ── Search history (last 5 kept) ────────────────────
+    searchHistory:       { type: [SearchHistorySchema], default: [] },
     // ── Password reset OTP ──────────────────────────────
     resetPasswordOTP:       { type: String, default: null, select: false },
     resetPasswordOTPExpiry: { type: Date,   default: null, select: false },
-
     // ── OTP rate limiting ───────────────────────────────
     otpRequestCount:        { type: Number, default: 0,    select: false },
     otpWindowStart:         { type: Date,   default: null, select: false },
