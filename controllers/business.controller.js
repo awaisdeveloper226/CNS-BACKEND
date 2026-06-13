@@ -746,121 +746,60 @@ const backfillCoordinatesGoogle = async (req, res) => {
 
 
 const getSearchHistory = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id).select("searchHistory");
+  // req.user._id is set by your auth middleware
+  const user = await User.findById(req.user._id)
+    .select("searchHistory")
+    .lean();
 
   if (!user) {
     res.status(404);
     throw new Error("User not found");
   }
 
-  // Already stored newest-first; just return the queries
-  const history = (user.searchHistory || []).map((h) => h.query);
+  // Return newest-first, capped at MAX_HISTORY
+  const history = (user.searchHistory ?? [])
+    .sort((a, b) => new Date(b.searchedAt) - new Date(a.searchedAt))
+    .slice(0, MAX_HISTORY)
+    .map((h) => h.query);
 
   res.status(200).json({ history });
 });
 
+/**
+ * @desc  Push a query to the current user's search history
+ * @route POST /api/users/search-history
+ * @access Private
+ * Body: { query: string }
+ */
 const addSearchHistory = asyncHandler(async (req, res) => {
   const { query } = req.body;
 
-  if (!query || !query.trim()) {
+  if (!query || typeof query !== "string" || !query.trim()) {
     res.status(400);
     throw new Error("query is required");
   }
 
   const trimmed = query.trim();
 
-  const user = await User.findById(req.user._id);
-  if (!user) {
-    res.status(404);
-    throw new Error("User not found");
-  }
-
-  // Remove any existing identical entry (case-insensitive) so it moves to the top
-  user.searchHistory = (user.searchHistory || []).filter(
-    (h) => h.query.toLowerCase() !== trimmed.toLowerCase()
-  );
-
-  // Insert at the front
-  user.searchHistory.unshift({ query: trimmed, searchedAt: new Date() });
-
-  // Keep only the last 5
-  user.searchHistory = user.searchHistory.slice(0, 5);
-
-  await user.save();
-
-  res.status(200).json({
-    history: user.searchHistory.map((h) => h.query),
+  // Pull any existing entry for this exact query (case-insensitive dedup),
+  // then push the fresh one, then trim the array to MAX_HISTORY newest entries.
+  await User.findByIdAndUpdate(req.user._id, {
+    // Remove any previous entry with the same query text
+    $pull: { searchHistory: { query: { $regex: `^${trimmed}$`, $options: "i" } } },
   });
+
+  await User.findByIdAndUpdate(req.user._id, {
+    $push: {
+      searchHistory: {
+        $each:     [{ query: trimmed, searchedAt: new Date() }],
+        $sort:     { searchedAt: -1 },
+        $slice:    MAX_HISTORY,
+      },
+    },
+  });
+
+  res.status(200).json({ message: "Search history updated" });
 });
-
-/**
- * @desc  Clear the current user's search history
- * @route DELETE /api/users/search-history
- * @access Private
- */
-const clearSearchHistory = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id);
-  if (!user) {
-    res.status(404);
-    throw new Error("User not found");
-  }
-
-  user.searchHistory = [];
-  await user.save();
-
-  res.status(200).json({ history: [] });
-});
-
-
-
-
-const getNearbyBusinesses = asyncHandler(async (req, res) => {
-  const { lat, lng } = req.query;
-  const limit = req.query.limit ? parseInt(req.query.limit, 10) : 10;
-
-  if (!lat || !lng) {
-    res.status(400);
-    throw new Error("lat and lng query params are required");
-  }
-
-  const userLat = parseFloat(lat);
-  const userLng = parseFloat(lng);
-
-  // Pull a reasonable pool of businesses that have coordinates, then sort by
-  // straight-line distance in JS. This avoids requiring a geo index migration.
-  const candidates = await Business.find({
-    "coordinates.lat": { $ne: null },
-    "coordinates.lng": { $ne: null },
-  })
-    .select("name address type coordinates totalContributions isVerified placeId")
-    .limit(500)
-    .lean();
-
-  const toRad = (deg) => (deg * Math.PI) / 180;
-  const haversineKm = (lat1, lon1, lat2, lon2) => {
-    const R = 6371;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  };
-
-  const withDistance = candidates
-    .map((b) => ({
-      ...b,
-      _distanceKm: haversineKm(userLat, userLng, b.coordinates.lat, b.coordinates.lng),
-    }))
-    .sort((a, b) => a._distanceKm - b._distanceKm)
-    .slice(0, limit);
-
-  res.status(200).json(withDistance);
-});
-
-
-
-
 
 module.exports = {
   searchFoursquarePlaces,
@@ -871,8 +810,5 @@ module.exports = {
   createFromGlobal,
   updateEntryPin,
   backfillCoordinatesGoogle,
-  getSearchHistory,
-  addSearchHistory,
-  clearSearchHistory,
-  getNearbyBusinesses
+  getSearchHistory, addSearchHistory,
 };
