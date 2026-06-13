@@ -42,7 +42,16 @@ const UserSchema = new mongoose.Schema(
     totalLikesReceived:  { type: Number, default: 0 },
     badges:              { type: [String], default: [] },
     // ── Search history (last 5 kept) ────────────────────
-    searchHistory:       { type: [SearchHistorySchema], default: [] },
+  searchHistory: {
+  type: [
+    {
+      query:     { type: String, required: true, trim: true },
+      searchedAt:{ type: Date,   default: Date.now },
+    },
+  ],
+  default: [],
+  select: true,
+},
     // ── Password reset OTP ──────────────────────────────
     resetPasswordOTP:       { type: String, default: null, select: false },
     resetPasswordOTPExpiry: { type: Date,   default: null, select: false },
