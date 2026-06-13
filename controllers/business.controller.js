@@ -814,7 +814,49 @@ const clearSearchHistory = asyncHandler(async (req, res) => {
 
 
 
+const getNearbyBusinesses = asyncHandler(async (req, res) => {
+  const { lat, lng } = req.query;
+  const limit = req.query.limit ? parseInt(req.query.limit, 10) : 10;
 
+  if (!lat || !lng) {
+    res.status(400);
+    throw new Error("lat and lng query params are required");
+  }
+
+  const userLat = parseFloat(lat);
+  const userLng = parseFloat(lng);
+
+  // Pull a reasonable pool of businesses that have coordinates, then sort by
+  // straight-line distance in JS. This avoids requiring a geo index migration.
+  const candidates = await Business.find({
+    "coordinates.lat": { $ne: null },
+    "coordinates.lng": { $ne: null },
+  })
+    .select("name address type coordinates totalContributions isVerified placeId")
+    .limit(500)
+    .lean();
+
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const haversineKm = (lat1, lon1, lat2, lon2) => {
+    const R = 6371;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
+
+  const withDistance = candidates
+    .map((b) => ({
+      ...b,
+      _distanceKm: haversineKm(userLat, userLng, b.coordinates.lat, b.coordinates.lng),
+    }))
+    .sort((a, b) => a._distanceKm - b._distanceKm)
+    .slice(0, limit);
+
+  res.status(200).json(withDistance);
+});
 
 
 
@@ -832,4 +874,5 @@ module.exports = {
   getSearchHistory,
   addSearchHistory,
   clearSearchHistory,
+  getNearbyBusinesses
 };
