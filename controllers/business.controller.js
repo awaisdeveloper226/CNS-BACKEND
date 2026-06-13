@@ -856,7 +856,6 @@ const getNearbyBusinesses = asyncHandler(async (req, res) => {
         includedTypes: [
           "store",
           "restaurant",
-          "food",
           "shopping_mall",
           "supermarket",
           "pharmacy",
