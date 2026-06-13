@@ -20,14 +20,14 @@ const normaliseSource = (raw) => {
  * @access Public
  */
 const searchFoursquarePlaces = asyncHandler(async (req, res) => {
-  const { q } = req.query;
+  const { q, lat, lng } = req.query;
 
   if (!q || !q.trim()) {
     return res.status(400).json({ message: "Query parameter 'q' is required" });
   }
 
   const query = q.trim();
-  console.log("🔍 Google Places search for query:", query);
+  console.log("🔍 Google Places search for query:", query, lat && lng ? `(biased to ${lat},${lng})` : "(no location bias)");
 
   if (!GOOGLE_API_KEY) {
     console.error("❌ Google Places API key missing in environment variables.");
@@ -35,21 +35,37 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   }
 
   try {
-    // Using Google Places API (New) Text Search
     const url = "https://places.googleapis.com/v1/places:searchText";
+
+    const requestBody = {
+      textQuery: query,
+      languageCode: "en",
+    };
+
+    // If the caller supplied coordinates, add a location bias so Google
+    // ranks nearby places higher. This is a soft bias — Google can still
+    // return results outside the radius if they are more relevant.
+    if (lat && lng) {
+      const parsedLat = parseFloat(lat);
+      const parsedLng = parseFloat(lng);
+      if (!isNaN(parsedLat) && !isNaN(parsedLng)) {
+        requestBody.locationBias = {
+          circle: {
+            center: { latitude: parsedLat, longitude: parsedLng },
+            radius: 20000.0, // 20 km — wide enough to cover a city
+          },
+        };
+      }
+    }
 
     const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": GOOGLE_API_KEY,
-        // Field mask specifies precisely what parameters we need to save billing costs
         "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.types",
       },
-      body: JSON.stringify({
-        textQuery: query,
-        languageCode: "en",
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
@@ -62,21 +78,17 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     const places = data.places || [];
     console.log(`✅ Google Places returned ${places.length} results`);
 
-    // Map Google SDK models straight into the client app's standard contract
-    const results = places.map((place) => {
-      return {
-        // Retain standard osm prefix parsing or make it generic for Google keys
-        placeId: place.id, 
-        name: place.displayName?.text || "Unknown Name",
-        address: place.formattedAddress || "Address not available",
-        source: "google",
-        type: "Standalone",
-        totalContributions: 0,
-        isVerified: false,
-        lat: place.location?.latitude ?? null,
-        lng: place.location?.longitude ?? null,
-      };
-    });
+    const results = places.map((place) => ({
+      placeId: place.id,
+      name: place.displayName?.text || "Unknown Name",
+      address: place.formattedAddress || "Address not available",
+      source: "google",
+      type: "Standalone",
+      totalContributions: 0,
+      isVerified: false,
+      lat: place.location?.latitude ?? null,
+      lng: place.location?.longitude ?? null,
+    }));
 
     return res.status(200).json(results);
   } catch (error) {
