@@ -36,6 +36,19 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     return res.status(500).json({ message: "Server configuration error: Missing API Key" });
   }
 
+  let parsedLat = null;
+  let parsedLng = null;
+  if (lat && lng) {
+    const pl = parseFloat(lat);
+    const pn = parseFloat(lng);
+    if (!isNaN(pl) && !isNaN(pn)) {
+      parsedLat = pl;
+      parsedLng = pn;
+    }
+  }
+
+  const RADIUS_METERS = 100000.0; // 100 km hard limit
+
   try {
     const url = "https://places.googleapis.com/v1/places:searchText";
 
@@ -44,20 +57,15 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
       languageCode: "en",
     };
 
-    // If the caller supplied coordinates, add a location bias so Google
-    // ranks nearby places higher. This is a soft bias — Google can still
-    // return results outside the radius if they are more relevant.
-    if (lat && lng) {
-      const parsedLat = parseFloat(lat);
-      const parsedLng = parseFloat(lng);
-      if (!isNaN(parsedLat) && !isNaN(parsedLng)) {
-        requestBody.locationBias = {
-          circle: {
-            center: { latitude: parsedLat, longitude: parsedLng },
-            radius: 20000.0, // 20 km — wide enough to cover a city
-          },
-        };
-      }
+    // Soft bias toward the user's area — Google ranks nearby places higher
+    // but can still return results outside the radius, so we hard-filter below.
+    if (parsedLat !== null && parsedLng !== null) {
+      requestBody.locationBias = {
+        circle: {
+          center: { latitude: parsedLat, longitude: parsedLng },
+          radius: RADIUS_METERS,
+        },
+      };
     }
 
     const response = await fetch(url, {
@@ -78,9 +86,9 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
 
     const data = await response.json();
     const places = data.places || [];
-    console.log(`✅ Google Places returned ${places.length} results`);
+    console.log(`✅ Google Places returned ${places.length} results (pre-filter)`);
 
-    const results = places.map((place) => ({
+    let results = places.map((place) => ({
       placeId: place.id,
       name: place.displayName?.text || "Unknown Name",
       address: place.formattedAddress || "Address not available",
@@ -91,6 +99,30 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
       lat: place.location?.latitude ?? null,
       lng: place.location?.longitude ?? null,
     }));
+
+    // ── Hard 100km filter ────────────────────────────────────────────────────
+    // locationBias is only a ranking hint — Google can still return results
+    // far outside it. We drop anything beyond RADIUS_METERS when we have
+    // the user's coordinates.
+   if (parsedLat !== null && parsedLng !== null) {
+      results = results
+        .map((r) => {
+          if (r.lat == null || r.lng == null) return { ...r, _distanceKm: null };
+          const dLat = (r.lat - parsedLat) * (Math.PI / 180);
+          const dLng = (r.lng - parsedLng) * (Math.PI / 180);
+          const a =
+            Math.sin(dLat / 2) ** 2 +
+            Math.cos(parsedLat * (Math.PI / 180)) *
+              Math.cos(r.lat * (Math.PI / 180)) *
+              Math.sin(dLng / 2) ** 2;
+          const distanceKm =
+            Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+          return { ...r, _distanceKm: distanceKm };
+        })
+        .filter((r) => r._distanceKm != null && r._distanceKm * 1000 <= RADIUS_METERS);
+
+      console.log(`✅ ${results.length} results within 100km`);
+    }
 
     return res.status(200).json(results);
   } catch (error) {
