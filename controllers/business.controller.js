@@ -16,6 +16,92 @@ const normaliseSource = (raw) => {
   return VALID.includes(raw) ? raw : "nominatim";
 };
 
+// ══════════════════════════════════════════════════════════════════════════════
+// IN-MEMORY CACHE + IN-FLIGHT REQUEST DEDUP
+// ──────────────────────────────────────────────────────────────────────────────
+// Goal: cut down on Google Places "SearchTextRequest" and "searchNearby" calls,
+// which are subject to very low daily quotas on the free tier.
+//
+// - cacheGet/cacheSet: simple Map-based TTL cache, scoped per cache name.
+// - dedupeInFlight: if two requests for the *same* key arrive while a Google
+//   call is still pending, the second one waits for and reuses the first
+//   request's result instead of firing a duplicate API call.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const _caches = new Map(); // cacheName -> Map<key, { value, expiresAt }>
+const _inFlight = new Map(); // cacheName:key -> Promise
+
+function _getCache(name) {
+  if (!_caches.has(name)) _caches.set(name, new Map());
+  return _caches.get(name);
+}
+
+function cacheGet(name, key) {
+  const cache = _getCache(name);
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    cache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function cacheSet(name, key, value, ttlMs) {
+  const cache = _getCache(name);
+  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+
+  // Opportunistic cleanup so the Map doesn't grow unbounded on long-lived
+  // Render instances. Cheap O(n) sweep, only runs occasionally.
+  if (cache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of cache) {
+      if (now > v.expiresAt) cache.delete(k);
+    }
+  }
+}
+
+/**
+ * Runs `fn` only once per unique (cacheName, key) while a previous call is
+ * still pending — concurrent callers await the same in-flight promise.
+ */
+async function dedupeInFlight(cacheName, key, fn) {
+  const flightKey = `${cacheName}:${key}`;
+  if (_inFlight.has(flightKey)) {
+    return _inFlight.get(flightKey);
+  }
+  const promise = (async () => {
+    try {
+      return await fn();
+    } finally {
+      _inFlight.delete(flightKey);
+    }
+  })();
+  _inFlight.set(flightKey, promise);
+  return promise;
+}
+
+/**
+ * Normalises a free-text search query into a stable cache key:
+ * lowercased, trimmed, collapsed whitespace.
+ */
+function normaliseQueryKey(q) {
+  return q.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Rounds coordinates to ~1.1km precision (3 decimals) so that nearby
+ * requests from roughly the same area share a cache entry instead of
+ * each missing by a few meters.
+ */
+function roundCoord(n) {
+  return Math.round(n * 1000) / 1000;
+}
+
+const PLACES_SEARCH_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const NEARBY_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const REVERSE_GEOCODE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 /**
  * @desc  Search places via Nominatim (OpenStreetMap) — free, no API key required
  * @route GET /api/businesses/places-search?q=KFC+Lahore
@@ -50,82 +136,111 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   const FILTER_RADIUS_METERS = 100000.0; // 100 km hard filter (applied after fetch)
   const BIAS_RADIUS_METERS = 50000.0;    // 50 km — Google's locationBias max
 
+  // ── Cache key: normalised query + coarse-rounded location bias ────────────
+  // Same query text from roughly the same area reuses the cached result
+  // instead of hitting Google again.
+  const cacheKey =
+    normaliseQueryKey(query) +
+    (parsedLat !== null && parsedLng !== null
+      ? `|${roundCoord(parsedLat)},${roundCoord(parsedLng)}`
+      : "|nobias");
+
+  const cached = cacheGet("placesSearch", cacheKey);
+  if (cached !== undefined) {
+    console.log("✅ Places search cache hit for:", query);
+    return res.status(200).json(cached);
+  }
+
   try {
-    const url = "https://places.googleapis.com/v1/places:searchText";
+    const results = await dedupeInFlight("placesSearch", cacheKey, async () => {
+      const url = "https://places.googleapis.com/v1/places:searchText";
 
-    const requestBody = {
-      textQuery: query,
-      languageCode: "en",
-    };
-
-    // Soft bias toward the user's area — Google ranks nearby places higher
-    // but can still return results outside the radius, so we hard-filter below.
-    if (parsedLat !== null && parsedLng !== null) {
-      requestBody.locationBias = {
-        circle: {
-          center: { latitude: parsedLat, longitude: parsedLng },
-          radius: BIAS_RADIUS_METERS,
-        },
+      const requestBody = {
+        textQuery: query,
+        languageCode: "en",
       };
-    }
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": GOOGLE_API_KEY,
-        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.types",
-      },
-      body: JSON.stringify(requestBody),
+      // Soft bias toward the user's area — Google ranks nearby places higher
+      // but can still return results outside the radius, so we hard-filter below.
+      if (parsedLat !== null && parsedLng !== null) {
+        requestBody.locationBias = {
+          circle: {
+            center: { latitude: parsedLat, longitude: parsedLng },
+            radius: BIAS_RADIUS_METERS,
+          },
+        };
+      }
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": GOOGLE_API_KEY,
+          "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.types",
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`❌ Google Places error ${response.status}:`, errText);
+        const err = new Error("Global place search failed");
+        err.statusCode = 502;
+        err.detail = errText;
+        throw err;
+      }
+
+      const data = await response.json();
+      const places = data.places || [];
+      console.log(`✅ Google Places returned ${places.length} results (pre-filter)`);
+
+      let mapped = places.map((place) => ({
+        placeId: place.id,
+        name: place.displayName?.text || "Unknown Name",
+        address: place.formattedAddress || "Address not available",
+        source: "google",
+        type: "Standalone",
+        totalContributions: 0,
+        isVerified: false,
+        lat: place.location?.latitude ?? null,
+        lng: place.location?.longitude ?? null,
+      }));
+
+      // ── Hard 100km filter ────────────────────────────────────────────────
+      // locationBias is only a ranking hint — Google can still return results
+      // far outside it. We drop anything beyond RADIUS_METERS when we have
+      // the user's coordinates.
+      if (parsedLat !== null && parsedLng !== null) {
+        mapped = mapped
+          .map((r) => {
+            if (r.lat == null || r.lng == null) return { ...r, _distanceKm: null };
+            const dLat = (r.lat - parsedLat) * (Math.PI / 180);
+            const dLng = (r.lng - parsedLng) * (Math.PI / 180);
+            const a =
+              Math.sin(dLat / 2) ** 2 +
+              Math.cos(parsedLat * (Math.PI / 180)) *
+                Math.cos(r.lat * (Math.PI / 180)) *
+                Math.sin(dLng / 2) ** 2;
+            const distanceKm =
+              Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+            return { ...r, _distanceKm: distanceKm };
+          })
+          .filter((r) => r._distanceKm != null && r._distanceKm * 1000 <= FILTER_RADIUS_METERS);
+
+        console.log(`✅ ${mapped.length} results within 100km`);
+      }
+
+      // Cache the final, filtered result set.
+      cacheSet("placesSearch", cacheKey, mapped, PLACES_SEARCH_TTL_MS);
+
+      return mapped;
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`❌ Google Places error ${response.status}:`, errText);
-      return res.status(502).json({ message: "Global place search failed", detail: errText });
-    }
-
-    const data = await response.json();
-    const places = data.places || [];
-    console.log(`✅ Google Places returned ${places.length} results (pre-filter)`);
-
-    let results = places.map((place) => ({
-      placeId: place.id,
-      name: place.displayName?.text || "Unknown Name",
-      address: place.formattedAddress || "Address not available",
-      source: "google",
-      type: "Standalone",
-      totalContributions: 0,
-      isVerified: false,
-      lat: place.location?.latitude ?? null,
-      lng: place.location?.longitude ?? null,
-    }));
-
-    // ── Hard 100km filter ────────────────────────────────────────────────────
-    // locationBias is only a ranking hint — Google can still return results
-    // far outside it. We drop anything beyond RADIUS_METERS when we have
-    // the user's coordinates.
-   if (parsedLat !== null && parsedLng !== null) {
-      results = results
-        .map((r) => {
-          if (r.lat == null || r.lng == null) return { ...r, _distanceKm: null };
-          const dLat = (r.lat - parsedLat) * (Math.PI / 180);
-          const dLng = (r.lng - parsedLng) * (Math.PI / 180);
-          const a =
-            Math.sin(dLat / 2) ** 2 +
-            Math.cos(parsedLat * (Math.PI / 180)) *
-              Math.cos(r.lat * (Math.PI / 180)) *
-              Math.sin(dLng / 2) ** 2;
-          const distanceKm =
-            Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
-          return { ...r, _distanceKm: distanceKm };
-        })
-        .filter((r) => r._distanceKm != null && r._distanceKm * 1000 <= FILTER_RADIUS_METERS);
-
-      console.log(`✅ ${results.length} results within 100km`);
-    }
     return res.status(200).json(results);
   } catch (error) {
+    if (error.statusCode === 502) {
+      return res.status(502).json({ message: "Global place search failed", detail: error.detail });
+    }
     console.error("❌ Google Places fetch error:", error);
     return res.status(502).json({ message: "Place search service error" });
   }
@@ -145,91 +260,116 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 
   console.log(`[Geocode] Fetching for lat=${lat}, lng=${lng}`);
 
-  if (GOOGLE_API_KEY) {
-    const geocodeRes = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`
-    );
-    const geocodeData = await geocodeRes.json();
-    console.log("[Geocode] Google status:", geocodeData.status);
+  // ── Cache key: coordinates rounded to ~110m precision (4 decimals) ────────
+  // Reverse geocoding the "same spot" repeatedly (e.g. courier re-opening the
+  // map picker near the same location) reuses the cached address.
+  const cacheKey = `${roundCoord(parseFloat(lat) * 10) / 10},${roundCoord(parseFloat(lng) * 10) / 10}`;
+  const cached = cacheGet("reverseGeocode", cacheKey);
+  if (cached !== undefined) {
+    console.log("✅ Reverse geocode cache hit for:", cacheKey);
+    return res.status(200).json(cached);
+  }
 
-    let nearbyName = null;
+  const result = await dedupeInFlight("reverseGeocode", cacheKey, async () => {
+    if (GOOGLE_API_KEY) {
+      const geocodeRes = await fetch(
+        `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_API_KEY}`
+      );
+      const geocodeData = await geocodeRes.json();
+      console.log("[Geocode] Google status:", geocodeData.status);
+
+      let nearbyName = null;
+      try {
+        const nearbyRes = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_API_KEY,
+            "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
+          },
+          body: JSON.stringify({
+            locationRestriction: {
+              circle: {
+                center: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
+                radius: 100.0,
+              },
+            },
+            maxResultCount: 1,
+          }),
+        });
+        const nearbyData = await nearbyRes.json();
+        nearbyName = nearbyData.places?.[0]?.displayName?.text ?? null;
+      } catch (e) {
+        console.log("[Nearby Verification Failed] Continuing with geocode data.");
+      }
+
+      const payload = { ...geocodeData, nearbyName };
+
+      // Only cache successful geocodes — don't lock in a transient failure.
+      if (geocodeData.status === "OK") {
+        cacheSet("reverseGeocode", cacheKey, payload, REVERSE_GEOCODE_TTL_MS);
+      }
+
+      return { payload, status: 200 };
+    }
+
+    console.log("[Geocode] No Google key — falling back to Nominatim reverse geocode");
     try {
-      const nearbyRes = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
-        method: "POST",
+      const url =
+        `https://nominatim.openstreetmap.org/reverse` +
+        `?lat=${lat}&lon=${lng}` +
+        `&format=json` +
+        `&addressdetails=1`;
+
+      const nominatimRes = await fetch(url, {
         headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": GOOGLE_API_KEY,
-          "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
+          "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
+          "Accept-Language": "en",
         },
-        body: JSON.stringify({
-          locationRestriction: {
-            circle: {
-              center: { latitude: parseFloat(lat), longitude: parseFloat(lng) },
-              radius: 100.0,
+      });
+
+      if (!nominatimRes.ok) {
+        return { payload: { message: "Reverse geocode failed" }, status: 502 };
+      }
+
+      const data = await nominatimRes.json();
+      const addr = data.address || {};
+
+      const formatted =
+        [
+          addr.road || addr.pedestrian,
+          addr.suburb || addr.neighbourhood,
+          addr.city || addr.town || addr.village,
+          addr.state,
+          addr.country,
+        ]
+          .filter(Boolean)
+          .join(", ") || data.display_name;
+
+      const payload = {
+        status: "OK",
+        results: [
+          {
+            formatted_address: formatted,
+            geometry: {
+              location: { lat: parseFloat(lat), lng: parseFloat(lng) },
             },
           },
-          maxResultCount: 1,
-        }),
-      });
-      const nearbyData = await nearbyRes.json();
-      nearbyName = nearbyData.places?.[0]?.displayName?.text ?? null;
-    } catch (e) {
-      console.log("[Nearby Verification Failed] Continuing with geocode data.");
+        ],
+        nearbyName: data.name || data.display_name?.split(",")[0] || null,
+        _source: "nominatim",
+      };
+
+      cacheSet("reverseGeocode", cacheKey, payload, REVERSE_GEOCODE_TTL_MS);
+
+      return { payload, status: 200 };
+    } catch (error) {
+      console.error("❌ Nominatim reverse geocode error:", error);
+      return { payload: { message: "Reverse geocode service error" }, status: 502 };
     }
+  });
 
-    return res.status(200).json({ ...geocodeData, nearbyName });
-  }
-
-  console.log("[Geocode] No Google key — falling back to Nominatim reverse geocode");
-  try {
-    const url =
-      `https://nominatim.openstreetmap.org/reverse` +
-      `?lat=${lat}&lon=${lng}` +
-      `&format=json` +
-      `&addressdetails=1`;
-
-    const nominatimRes = await fetch(url, {
-      headers: {
-        "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)",
-        "Accept-Language": "en",
-      },
-    });
-
-    if (!nominatimRes.ok) {
-      return res.status(502).json({ message: "Reverse geocode failed" });
-    }
-
-    const data = await nominatimRes.json();
-    const addr = data.address || {};
-
-    const formatted =
-      [
-        addr.road || addr.pedestrian,
-        addr.suburb || addr.neighbourhood,
-        addr.city || addr.town || addr.village,
-        addr.state,
-        addr.country,
-      ]
-        .filter(Boolean)
-        .join(", ") || data.display_name;
-
-    return res.status(200).json({
-      status: "OK",
-      results: [
-        {
-          formatted_address: formatted,
-          geometry: {
-            location: { lat: parseFloat(lat), lng: parseFloat(lng) },
-          },
-        },
-      ],
-      nearbyName: data.name || data.display_name?.split(",")[0] || null,
-      _source: "nominatim",
-    });
-  } catch (error) {
-    console.error("❌ Nominatim reverse geocode error:", error);
-    return res.status(502).json({ message: "Reverse geocode service error" });
-  }
+  return res.status(result.status).json(result.payload);
 });
 
 /**
@@ -869,96 +1009,117 @@ const getNearbyBusinesses = asyncHandler(async (req, res) => {
     return res.status(500).json({ message: "Server configuration error: Missing API Key" });
   }
 
+  // ── Cache key: coordinates rounded to ~110m precision + limit ─────────────
+  // Repeated "Near You" loads from roughly the same spot reuse the cached
+  // result instead of re-hitting Google Nearby.
+  const cacheKey = `${roundCoord(parsedLat * 10) / 10},${roundCoord(parsedLng * 10) / 10}|${parsedLimit}`;
+  const cached = cacheGet("nearbyBusinesses", cacheKey);
+  if (cached !== undefined) {
+    console.log("✅ Nearby businesses cache hit for:", cacheKey);
+    return res.status(200).json(cached);
+  }
+
   try {
-    const response = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": GOOGLE_API_KEY,
-        "X-Goog-FieldMask":
-          "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.businessStatus",
-      },
-      body: JSON.stringify({
-        locationRestriction: {
-          circle: {
-            center: { latitude: parsedLat, longitude: parsedLng },
-            radius: 1000.0, // 1 km — tight radius, these are "right near you" results
-          },
+    const results = await dedupeInFlight("nearbyBusinesses", cacheKey, async () => {
+      const response = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": GOOGLE_API_KEY,
+          "X-Goog-FieldMask":
+            "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.businessStatus",
         },
-        // Only return places that are actually open businesses, not parks/roads etc.
-        includedTypes: [
-          "store",
-          "restaurant",
-          "shopping_mall",
-          "supermarket",
-          "pharmacy",
-          "bank",
-          "hospital",
-          "gym",
-          "cafe",
-          "clothing_store",
-          "convenience_store",
-          "department_store",
-          "electronics_store",
-          "furniture_store",
-          "home_goods_store",
-          "jewelry_store",
-          "shoe_store",
-          "bakery",
-          "fast_food_restaurant",
-        ],
-        maxResultCount: parsedLimit,
-        languageCode: "en",
-      }),
+        body: JSON.stringify({
+          locationRestriction: {
+            circle: {
+              center: { latitude: parsedLat, longitude: parsedLng },
+              radius: 1000.0, // 1 km — tight radius, these are "right near you" results
+            },
+          },
+          // Only return places that are actually open businesses, not parks/roads etc.
+          includedTypes: [
+            "store",
+            "restaurant",
+            "shopping_mall",
+            "supermarket",
+            "pharmacy",
+            "bank",
+            "hospital",
+            "gym",
+            "cafe",
+            "clothing_store",
+            "convenience_store",
+            "department_store",
+            "electronics_store",
+            "furniture_store",
+            "home_goods_store",
+            "jewelry_store",
+            "shoe_store",
+            "bakery",
+            "fast_food_restaurant",
+          ],
+          maxResultCount: parsedLimit,
+          languageCode: "en",
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`❌ Google Nearby error ${response.status}:`, errText);
+        const err = new Error("Nearby search failed");
+        err.statusCode = 502;
+        throw err;
+      }
+
+      const data = await response.json();
+      const places = data.places || [];
+      console.log(`✅ Google Nearby returned ${places.length} results for (${parsedLat}, ${parsedLng})`);
+
+      // Map to the same contract the frontend expects for NearbyBusiness,
+      // which extends Business and adds _distanceKm
+      const mapped = places.map((place) => {
+        const placeLat = place.location?.latitude ?? parsedLat;
+        const placeLng = place.location?.longitude ?? parsedLng;
+
+        // Haversine distance
+        const dLat = (placeLat - parsedLat) * (Math.PI / 180);
+        const dLng = (placeLng - parsedLng) * (Math.PI / 180);
+        const a =
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(parsedLat * (Math.PI / 180)) *
+            Math.cos(placeLat * (Math.PI / 180)) *
+            Math.sin(dLng / 2) ** 2;
+        const distanceKm =
+          Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+
+        return {
+          placeId: place.id,
+          name: place.displayName?.text || "Unknown",
+          address: place.formattedAddress || "Address not available",
+          source: "google",
+          type: "Standalone",
+          totalContributions: 0,
+          isVerified: false,
+          lat: placeLat,
+          lng: placeLng,
+          _distanceKm: distanceKm,
+          _fromFoursquare: true, // marks it as global so the frontend handles it correctly
+        };
+      });
+
+      // Sort by distance — Google Nearby doesn't guarantee distance order
+      mapped.sort((a, b) => a._distanceKm - b._distanceKm);
+
+      cacheSet("nearbyBusinesses", cacheKey, mapped, NEARBY_TTL_MS);
+
+      return mapped;
     });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`❌ Google Nearby error ${response.status}:`, errText);
-      return res.status(502).json({ message: "Nearby search failed" });
-    }
-
-    const data = await response.json();
-    const places = data.places || [];
-    console.log(`✅ Google Nearby returned ${places.length} results for (${parsedLat}, ${parsedLng})`);
-
-    // Map to the same contract the frontend expects for NearbyBusiness,
-    // which extends Business and adds _distanceKm
-    const results = places.map((place) => {
-      const placeLat = place.location?.latitude ?? parsedLat;
-      const placeLng = place.location?.longitude ?? parsedLng;
-
-      // Haversine distance
-      const dLat = (placeLat - parsedLat) * (Math.PI / 180);
-      const dLng = (placeLng - parsedLng) * (Math.PI / 180);
-      const a =
-        Math.sin(dLat / 2) ** 2 +
-        Math.cos(parsedLat * (Math.PI / 180)) *
-          Math.cos(placeLat * (Math.PI / 180)) *
-          Math.sin(dLng / 2) ** 2;
-      const distanceKm =
-        Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
-
-      return {
-        placeId: place.id,
-        name: place.displayName?.text || "Unknown",
-        address: place.formattedAddress || "Address not available",
-        source: "google",
-        type: "Standalone",
-        totalContributions: 0,
-        isVerified: false,
-        lat: placeLat,
-        lng: placeLng,
-        _distanceKm: distanceKm,
-        _fromFoursquare: true, // marks it as global so the frontend handles it correctly
-      };
-    });
-
-    // Sort by distance — Google Nearby doesn't guarantee distance order
-    results.sort((a, b) => a._distanceKm - b._distanceKm);
 
     return res.status(200).json(results);
   } catch (error) {
+    if (error.statusCode === 502) {
+      return res.status(502).json({ message: "Nearby search failed" });
+    }
     console.error("❌ Google Nearby fetch error:", error);
     return res.status(502).json({ message: "Nearby search service error" });
   }
