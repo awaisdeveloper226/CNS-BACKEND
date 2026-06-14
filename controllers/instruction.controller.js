@@ -116,7 +116,7 @@ const getInstructionById = asyncHandler(async (req, res) => {
 
     res.status(200).json({
         id: instruction._id.toString(),
-        userId: instruction.user?._id,
+        userId: instruction.user?._id?.toString(),
         userName: instruction.user?.name || 'Anonymous',
         userLevel: instruction.user?.level || 1,
         notes: instruction.notes,
@@ -217,6 +217,67 @@ const createInstruction = asyncHandler(async (req, res) => {
     }
 });
 
+const updateInstruction = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const userId = req.user._id;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+        res.status(400);
+        throw new Error('Invalid instruction ID');
+    }
+
+    const instruction = await Instruction.findById(id);
+
+    if (!instruction) {
+        res.status(404);
+        throw new Error('Instruction not found');
+    }
+
+    if (!instruction.user.equals(userId)) {
+        res.status(403);
+        throw new Error('You can only edit your own instructions');
+    }
+
+    const {
+        notes,
+        audioUrl,
+        audioDuration,
+        type,
+        category,
+        tags,
+        photos,
+        videos,
+    } = req.body;
+
+    if (notes !== undefined) instruction.notes = notes;
+    if (audioUrl !== undefined) instruction.audioUrl = audioUrl;
+    if (audioDuration !== undefined) instruction.audioDuration = audioDuration;
+    if (type !== undefined) instruction.type = type;
+    if (category !== undefined) instruction.category = category;
+    if (tags !== undefined) instruction.tags = tags;
+    if (photos !== undefined) instruction.photos = photos;
+    if (videos !== undefined) instruction.videos = videos;
+
+    const updated = await instruction.save();
+
+    res.status(200).json({
+        id: updated._id.toString(),
+        notes: updated.notes,
+        audioUrl: updated.audioUrl,
+        audioDuration: updated.audioDuration,
+        type: updated.type,
+        category: updated.category,
+        photos: updated.photos,
+        videos: updated.videos,
+        tags: updated.tags,
+    });
+});
+
+
+
+
+
+
 const handleVote = async (req, res, voteAction) => {
     const instructionId = req.params.id;
     const userId = req.user._id;
@@ -298,6 +359,7 @@ module.exports = {
     getInstructionsByBusiness,
     getInstructionById,
     createInstruction,
+    updateInstruction,
     likeInstruction,
     dislikeInstruction,
 };
