@@ -47,7 +47,8 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     }
   }
 
-  const RADIUS_METERS = 100000.0; // 100 km hard limit
+  const FILTER_RADIUS_METERS = 100000.0; // 100 km hard filter (applied after fetch)
+  const BIAS_RADIUS_METERS = 50000.0;    // 50 km — Google's locationBias max
 
   try {
     const url = "https://places.googleapis.com/v1/places:searchText";
@@ -63,7 +64,7 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
       requestBody.locationBias = {
         circle: {
           center: { latitude: parsedLat, longitude: parsedLng },
-          radius: RADIUS_METERS,
+          radius: BIAS_RADIUS_METERS,
         },
       };
     }
@@ -119,11 +120,10 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
             Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
           return { ...r, _distanceKm: distanceKm };
         })
-        .filter((r) => r._distanceKm != null && r._distanceKm * 1000 <= RADIUS_METERS);
+        .filter((r) => r._distanceKm != null && r._distanceKm * 1000 <= FILTER_RADIUS_METERS);
 
       console.log(`✅ ${results.length} results within 100km`);
     }
-
     return res.status(200).json(results);
   } catch (error) {
     console.error("❌ Google Places fetch error:", error);
