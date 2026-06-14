@@ -6,6 +6,7 @@ const {
   likeInstruction,
   dislikeInstruction,
   getInstructionsByBusiness,
+  updateInstruction,
   getInstructionById,
 } = require('../controllers/instruction.controller');
 
@@ -27,6 +28,8 @@ router.get('/:id', getInstructionById);
 // Create instruction
 // POST /api/instructions
 router.post('/', uploadKeyOrProtect, createInstruction);
+
+router.put('/:id', protect, updateInstruction);
 
 // Like instruction
 // PUT /api/instructions/:id/like
