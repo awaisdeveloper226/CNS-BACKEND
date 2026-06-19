@@ -47,6 +47,14 @@ app.get('/', (req, res) => {
   });
 });
 
+
+// In your main server file (e.g. server.js or app.js)
+app.get("/api/health", (req, res) => {
+  res.status(200).json({ status: "ok", timestamp: Date.now() });
+});
+
+
+
 // ==============================
 // API Routes
 // ==============================
