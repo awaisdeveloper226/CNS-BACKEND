@@ -233,10 +233,7 @@ const updateInstruction = asyncHandler(async (req, res) => {
         throw new Error('Instruction not found');
     }
 
-    if (!instruction.user.equals(userId)) {
-        res.status(403);
-        throw new Error('You can only edit your own instructions');
-    }
+   
 
     const {
         notes,
