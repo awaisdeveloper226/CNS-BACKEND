@@ -1134,9 +1134,13 @@ const getNearbyBusinesses = asyncHandler(async (req, res) => {
 const proxyDirections = asyncHandler(async (req, res) => {
   const { originLat, originLng, destLat, destLng } = req.body;
 
+  console.log("[proxyDirections] body received:", req.body);  // ADD
+
   if (!originLat || !originLng || !destLat || !destLng) {
     return res.status(400).json({ error: "originLat, originLng, destLat, destLng are required" });
   }
+
+  console.log("[proxyDirections] ROUTING_API key set?", !!ROUTING_API);  // ADD
 
   const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
     method: "POST",
@@ -1172,6 +1176,9 @@ const proxyDirections = asyncHandler(async (req, res) => {
   });
 
   const data = await response.json();
+
+  console.log("[proxyDirections] Google status:", response.status);       // ADD
+  console.log("[proxyDirections] Google response:", JSON.stringify(data)); // ADD
 
   if (!response.ok) {
     console.error("[proxyDirections] Routes API error:", data);
