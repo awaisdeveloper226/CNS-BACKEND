@@ -20,13 +20,17 @@ const normaliseSource = (raw) => {
 // ══════════════════════════════════════════════════════════════════════════════
 // IN-MEMORY CACHE + IN-FLIGHT REQUEST DEDUP
 // ──────────────────────────────────────────────────────────────────────────────
-// Goal: cut down on Google Places "SearchTextRequest" and "searchNearby" calls,
-// which are subject to very low daily quotas on the free tier.
+// Goal: cut down on Google Places "SearchTextRequest" / "searchNearby" calls
+// (low daily quotas) AND on repeated MongoDB reads for hot business/instruction
+// pages — every user hitting the same business benefits from one shared cache
+// instead of each device re-querying Mongo independently.
 //
 // - cacheGet/cacheSet: simple Map-based TTL cache, scoped per cache name.
-// - dedupeInFlight: if two requests for the *same* key arrive while a Google
-//   call is still pending, the second one waits for and reuses the first
-//   request's result instead of firing a duplicate API call.
+// - cacheDelete: explicit invalidation, used after writes so edits show up
+//   immediately instead of waiting out the TTL.
+// - dedupeInFlight: if two requests for the *same* key arrive while a
+//   DB/Google call is still pending, the second one waits for and reuses the
+//   first request's result instead of firing a duplicate call.
 // ══════════════════════════════════════════════════════════════════════════════
 
 const _caches = new Map(); // cacheName -> Map<key, { value, expiresAt }>
@@ -59,6 +63,27 @@ function cacheSet(name, key, value, ttlMs) {
     for (const [k, v] of cache) {
       if (now > v.expiresAt) cache.delete(k);
     }
+  }
+}
+
+/**
+ * Explicitly removes a single cache entry. Used right after a write so the
+ * next read is forced to go back to Mongo instead of serving stale data
+ * until the TTL naturally expires.
+ */
+function cacheDelete(name, key) {
+  _getCache(name).delete(key);
+}
+
+/**
+ * Clears every entry in a named cache whose key starts with `prefix`.
+ * Useful for list-style caches (e.g. getBusinesses) where any business
+ * mutation could affect many cached pages/search results.
+ */
+function cacheDeleteByPrefix(name, prefix) {
+  const cache = _getCache(name);
+  for (const k of cache.keys()) {
+    if (k.startsWith(prefix)) cache.delete(k);
   }
 }
 
@@ -102,6 +127,13 @@ function roundCoord(n) {
 const PLACES_SEARCH_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const NEARBY_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const REVERSE_GEOCODE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// ── NEW: TTLs for DB-backed business caching ────────────────────────────────
+// Short-ish TTLs because likes/comments/instructions change fairly often,
+// but still long enough that a business getting hit by many couriers in a
+// short window only pays the Mongo query cost once.
+const BUSINESS_DETAIL_TTL_MS = 45 * 1000; // 45 seconds
+const BUSINESS_LIST_TTL_MS = 30 * 1000; // 30 seconds
 
 /**
  * @desc  Search places via Nominatim (OpenStreetMap) — free, no API key required
@@ -377,133 +409,180 @@ const reverseGeocode = asyncHandler(async (req, res) => {
  * @desc  Get all businesses
  * @route GET /api/businesses
  * @access Public
+ *
+ * NEW: cached per (search, limit, skip) combination. This list is hit on
+ * basically every app open / home-screen load, so caching it server-side
+ * means the Nth user in a given TTL window pays zero Mongo cost.
  */
 const getBusinesses = asyncHandler(async (req, res) => {
-  const keyword = req.query.search
-    ? {
-        $or: [
-          { name: { $regex: req.query.search, $options: "i" } },
-          { address: { $regex: req.query.search, $options: "i" } },
-          { tags: { $regex: req.query.search, $options: "i" } },
-        ],
-      }
-    : {};
-
+  const searchTerm = req.query.search ? normaliseQueryKey(req.query.search) : "";
   const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0;
   const skip  = req.query.skip  ? parseInt(req.query.skip,  10) : 0;
 
-  const [businesses, total] = await Promise.all([
-    Business.find(keyword)
-      .sort({ totalContributions: -1 })
-      .skip(skip)
-      .limit(limit),
-    Business.countDocuments(keyword),
-  ]);
+  const cacheKey = `${searchTerm}|limit=${limit}|skip=${skip}`;
+  const cached = cacheGet("businessList", cacheKey);
+  if (cached !== undefined) {
+    console.log("✅ Business list cache hit:", cacheKey);
+    return res.status(200).json(cached);
+  }
 
-  res.status(200).json({ businesses, total });
+  const result = await dedupeInFlight("businessList", cacheKey, async () => {
+    const keyword = req.query.search
+      ? {
+          $or: [
+            { name: { $regex: req.query.search, $options: "i" } },
+            { address: { $regex: req.query.search, $options: "i" } },
+            { tags: { $regex: req.query.search, $options: "i" } },
+          ],
+        }
+      : {};
+
+    const [businesses, total] = await Promise.all([
+      Business.find(keyword)
+        .sort({ totalContributions: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Business.countDocuments(keyword),
+    ]);
+
+    const payload = { businesses, total };
+    cacheSet("businessList", cacheKey, payload, BUSINESS_LIST_TTL_MS);
+    return payload;
+  });
+
+  res.status(200).json(result);
 });
 
 /**
  * @desc  Get single business by ID with its instructions
  * @route GET /api/businesses/:id
  * @access Public
+ *
+ * NEW: this is the highest-value endpoint to cache — every courier viewing
+ * a popular business (mall, restaurant chain, etc.) triggers this same
+ * query + comment aggregation + populate chain. Caching it server-side
+ * means all of them share one Mongo round trip per TTL window instead of
+ * each device paying it individually (which is all AsyncStorage could do).
  */
 const getBusinessDetails = asyncHandler(async (req, res) => {
-  console.log("🔍 Fetching business details for ID:", req.params.id);
+  const businessId = req.params.id;
 
-  const business = await Business.findById(req.params.id)
-    .lean()
-    .populate({
-      path: "contributions",
-      model: "Instruction",
-      populate: {
-        path: "user",
-        model: "User",
-        select: "name level contributions totalLikesReceived",
-      },
-    });
-
-  if (!business) {
-    res.status(404);
-    throw new Error("Business not found");
+  const cached = cacheGet("businessDetail", businessId);
+  if (cached !== undefined) {
+    console.log("✅ Business detail cache hit for:", businessId);
+    return res.status(200).json(cached);
   }
 
-  if (business.contributions && business.contributions.length > 0) {
-    business.contributions.sort((a, b) => {
-      const scoreA = (a.likes || 0) - (a.dislikes || 0);
-      const scoreB = (b.likes || 0) - (b.dislikes || 0);
-      if (scoreA !== scoreB) return scoreB - scoreA;
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-    });
-  }
+  const detailedBusiness = await dedupeInFlight("businessDetail", businessId, async () => {
+    console.log("🔍 Fetching business details for ID:", businessId);
 
-  const instructionIds = business.contributions.map((i) => i._id);
-  const commentCounts = await Comment.aggregate([
-    { $match: { instruction: { $in: instructionIds } } },
-    { $group: { _id: "$instruction", count: { $sum: 1 } } },
-  ]);
-
-  const commentCountMap = {};
-  commentCounts.forEach((c) => {
-    commentCountMap[c._id.toString()] = c.count;
-  });
-
-  // ── Lazy coordinate backfill ───────────────────────────────────────────────
-  let coordinates = business.coordinates;
-  if (!coordinates?.lat && business.address) {
-    try {
-      const geoUrl =
-        `https://nominatim.openstreetmap.org/search` +
-        `?q=${encodeURIComponent(business.address)}&format=json&limit=1`;
-      const geoRes = await fetch(geoUrl, {
-        headers: { "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)" },
+    const business = await Business.findById(businessId)
+      .lean()
+      .populate({
+        path: "contributions",
+        model: "Instruction",
+        populate: {
+          path: "user",
+          model: "User",
+          select: "name level contributions totalLikesReceived",
+        },
       });
-      const geoData = await geoRes.json();
-      if (geoData?.[0]) {
-        const lat = parseFloat(geoData[0].lat);
-        const lng = parseFloat(geoData[0].lon);
-        coordinates = { lat, lng };
-        Business.findByIdAndUpdate(business._id, {
-          "coordinates.lat": lat,
-          "coordinates.lng": lng,
-        }).catch(() => {});
-      }
-    } catch (_) {}
-  }
 
-  const detailedBusiness = {
-    id: business._id,
-    name: business.name,
-    address: business.address,
-    type: business.type,
-    totalContributions: business.totalContributions,
-    isVerified: business.isVerified,
-    coordinates,
-    entryPin: business.entryPin ?? null,
-    contributions: business.contributions.map((instr) => ({
-      id: instr._id,
-      notes: instr.notes || "",
-      photos: instr.photos || [],
-      videos: instr.videos || [],
-      audioUrl: instr.audioUrl || null,
-      audioDuration: instr.audioDuration || null,
-      type: instr.type,
-      category: instr.category,
-      likes: instr.likes || 0,
-      dislikes: instr.dislikes || 0,
-      timestamp: instr.createdAt,
-      tags: instr.tags || [],
-      userId: instr.user?._id?.toString() || "unknown",
-      userName: instr.user?.name || "Anonymous User",
-      userLevel: instr.user?.level || 1,
-      isVerifiedBusinessInstruction: instr.isVerifiedBusinessInstruction ?? false,
-      votedUsers: (instr.votedUsers || []).map((vote) => ({
-        userId: vote.user?.toString() || vote.user,
-        voteType: vote.voteType,
+    if (!business) {
+      const err = new Error("Business not found");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (business.contributions && business.contributions.length > 0) {
+      business.contributions.sort((a, b) => {
+        const scoreA = (a.likes || 0) - (a.dislikes || 0);
+        const scoreB = (b.likes || 0) - (b.dislikes || 0);
+        if (scoreA !== scoreB) return scoreB - scoreA;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+    }
+
+    const instructionIds = business.contributions.map((i) => i._id);
+    const commentCounts = await Comment.aggregate([
+      { $match: { instruction: { $in: instructionIds } } },
+      { $group: { _id: "$instruction", count: { $sum: 1 } } },
+    ]);
+
+    const commentCountMap = {};
+    commentCounts.forEach((c) => {
+      commentCountMap[c._id.toString()] = c.count;
+    });
+
+    // ── Lazy coordinate backfill ───────────────────────────────────────────
+    let coordinates = business.coordinates;
+    if (!coordinates?.lat && business.address) {
+      try {
+        const geoUrl =
+          `https://nominatim.openstreetmap.org/search` +
+          `?q=${encodeURIComponent(business.address)}&format=json&limit=1`;
+        const geoRes = await fetch(geoUrl, {
+          headers: { "User-Agent": "CNS-CourierNavigatorSystem/1.0 (contact@yourdomain.com)" },
+        });
+        const geoData = await geoRes.json();
+        if (geoData?.[0]) {
+          const lat = parseFloat(geoData[0].lat);
+          const lng = parseFloat(geoData[0].lon);
+          coordinates = { lat, lng };
+          Business.findByIdAndUpdate(business._id, {
+            "coordinates.lat": lat,
+            "coordinates.lng": lng,
+          }).catch(() => {});
+        }
+      } catch (_) {}
+    }
+
+    const payload = {
+      id: business._id,
+      name: business.name,
+      address: business.address,
+      type: business.type,
+      totalContributions: business.totalContributions,
+      isVerified: business.isVerified,
+      coordinates,
+      entryPin: business.entryPin ?? null,
+      contributions: business.contributions.map((instr) => ({
+        id: instr._id,
+        notes: instr.notes || "",
+        photos: instr.photos || [],
+        videos: instr.videos || [],
+        audioUrl: instr.audioUrl || null,
+        audioDuration: instr.audioDuration || null,
+        type: instr.type,
+        category: instr.category,
+        likes: instr.likes || 0,
+        dislikes: instr.dislikes || 0,
+        timestamp: instr.createdAt,
+        tags: instr.tags || [],
+        userId: instr.user?._id?.toString() || "unknown",
+        userName: instr.user?.name || "Anonymous User",
+        userLevel: instr.user?.level || 1,
+        isVerifiedBusinessInstruction: instr.isVerifiedBusinessInstruction ?? false,
+        votedUsers: (instr.votedUsers || []).map((vote) => ({
+          userId: vote.user?.toString() || vote.user,
+          voteType: vote.voteType,
+        })),
+        commentCount: commentCountMap[instr._id.toString()] || 0,
       })),
-      commentCount: commentCountMap[instr._id.toString()] || 0,
-    })),
-  };
+    };
+
+    // Only cache successful lookups — never lock in a 404/error.
+    cacheSet("businessDetail", businessId, payload, BUSINESS_DETAIL_TTL_MS);
+
+    return payload;
+  }).catch((err) => {
+    if (err.statusCode === 404) {
+      res.status(404);
+      throw new Error("Business not found");
+    }
+    throw err;
+  });
 
   res.status(200).json(detailedBusiness);
 });
@@ -540,6 +619,9 @@ const createBusiness = asyncHandler(async (req, res) => {
           lng: req.body.lng ?? null,
         },
       });
+      // NEW: a brand-new business invalidates any cached business *lists*
+      // (search results / home feed) since totals/counts may shift.
+      cacheDeleteByPrefix("businessList", "");
       return res.status(201).json(business);
     } catch (err) {
       if (err.code === 11000) {
@@ -581,6 +663,7 @@ const createBusiness = asyncHandler(async (req, res) => {
       source: "manual",
       tags: [courierType],
     });
+    cacheDeleteByPrefix("businessList", "");
     return res.status(201).json(business);
   } catch (err) {
     if (err.code === 11000) {
@@ -714,6 +797,11 @@ const createFromGlobal = asyncHandler(async (req, res) => {
       ` "${business.name}" (placeId: ${placeId})`
     );
 
+    // NEW: invalidate both this business's detail cache (entryPin/coords
+    // just changed) and the list cache (new business may now appear/rank).
+    cacheDelete("businessDetail", String(business._id));
+    cacheDeleteByPrefix("businessList", "");
+
     return res.status(wasInserted ? 201 : 200).json(business);
   } catch (err) {
     // Race condition: two requests upserted simultaneously → duplicate key
@@ -725,6 +813,8 @@ const createFromGlobal = asyncHandler(async (req, res) => {
         existing.entryPin = pinDoc;
         existing.coordinates = coordsDoc;
         await existing.save();
+        cacheDelete("businessDetail", String(existing._id));
+        cacheDeleteByPrefix("businessList", "");
         return res.status(200).json(existing);
       }
     }
@@ -770,6 +860,10 @@ const updateEntryPin = asyncHandler(async (req, res) => {
       };
 
   await business.save();
+
+  // NEW: pin just changed — anyone re-opening this business should see it
+  // immediately, not after the TTL expires.
+  cacheDelete("businessDetail", String(business._id));
 
   res.status(200).json({
     message: isClearing ? "Entry pin cleared" : "Entry pin updated",
@@ -1192,11 +1286,23 @@ const proxyDirections = asyncHandler(async (req, res) => {
   return res.status(200).json(data);
 });
 
-
-
-
-
-
+// ══════════════════════════════════════════════════════════════════════════════
+// NEW: exported invalidation helper for OTHER controllers (instruction.controller.js)
+// ──────────────────────────────────────────────────────────────────────────────
+// Call this from createInstruction / updateInstruction / likeInstruction /
+// dislikeInstruction after a successful write, passing the business ID the
+// instruction belongs to. That way a new instruction, edit, or vote shows up
+// immediately on the next getBusinessDetails call instead of waiting up to
+// BUSINESS_DETAIL_TTL_MS for the cache to expire.
+//
+// Usage in instruction.controller.js:
+//   const { invalidateBusinessDetailCache } = require('./business.controller');
+//   invalidateBusinessDetailCache(businessId);
+// ══════════════════════════════════════════════════════════════════════════════
+function invalidateBusinessDetailCache(businessId) {
+  if (!businessId) return;
+  cacheDelete("businessDetail", String(businessId));
+}
 
 module.exports = {
   searchFoursquarePlaces,
@@ -1209,5 +1315,6 @@ module.exports = {
   backfillCoordinatesGoogle,
   getSearchHistory, addSearchHistory,
   proxyDirections,
-  getNearbyBusinesses, 
+  getNearbyBusinesses,
+  invalidateBusinessDetailCache, // NEW
 };
