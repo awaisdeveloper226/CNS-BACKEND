@@ -9,6 +9,7 @@ const User = require("../models/User");
 
 const GOOGLE_API_KEY = process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
 const GOOGLE_AHMED_KEY_FOR_GEOCODING=process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
+const ROUTING_API=process.env.ROUTING_API;
 const MAX_HISTORY = 5;
 
 const normaliseSource = (raw) => {
@@ -1130,6 +1131,58 @@ const getNearbyBusinesses = asyncHandler(async (req, res) => {
 
 
 
+const proxyDirections = asyncHandler(async (req, res) => {
+  const { originLat, originLng, destLat, destLng } = req.body;
+
+  if (!originLat || !originLng || !destLat || !destLng) {
+    return res.status(400).json({ error: "originLat, originLng, destLat, destLng are required" });
+  }
+
+  const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": ROUTING_API,
+      "X-Goog-FieldMask": [
+        "routes.duration",
+        "routes.distanceMeters",
+        "routes.polyline.encodedPolyline",
+        "routes.legs.steps.navigationInstruction",
+        "routes.legs.steps.distanceMeters",
+        "routes.legs.steps.staticDuration",
+        "routes.legs.steps.startLocation",
+        "routes.legs.steps.endLocation",
+        "routes.legs.distanceMeters",
+        "routes.legs.duration",
+      ].join(","),
+    },
+    body: JSON.stringify({
+      origin: {
+        location: { latLng: { latitude: Number(originLat), longitude: Number(originLng) } },
+      },
+      destination: {
+        location: { latLng: { latitude: Number(destLat), longitude: Number(destLng) } },
+      },
+      travelMode: "DRIVE",
+      routingPreference: "TRAFFIC_AWARE",
+      computeAlternativeRoutes: false,
+      languageCode: "en-US",
+      units: "METRIC",
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("[proxyDirections] Routes API error:", data);
+    return res.status(response.status).json({ error: data.error?.message || "Routes API error" });
+  }
+
+  return res.status(200).json(data);
+});
+
+
+
 
 
 
@@ -1144,5 +1197,6 @@ module.exports = {
   updateEntryPin,
   backfillCoordinatesGoogle,
   getSearchHistory, addSearchHistory,
+  proxyDirections,
   getNearbyBusinesses, 
 };
