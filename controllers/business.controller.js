@@ -128,10 +128,7 @@ const PLACES_SEARCH_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const NEARBY_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const REVERSE_GEOCODE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-// ── NEW: TTLs for DB-backed business caching ────────────────────────────────
-// Short-ish TTLs because likes/comments/instructions change fairly often,
-// but still long enough that a business getting hit by many couriers in a
-// short window only pays the Mongo query cost once.
+// ── TTLs for DB-backed business caching ─────────────────────────────────────
 const BUSINESS_DETAIL_TTL_MS = 45 * 1000; // 45 seconds
 const BUSINESS_LIST_TTL_MS = 30 * 1000; // 30 seconds
 
@@ -410,48 +407,60 @@ const reverseGeocode = asyncHandler(async (req, res) => {
  * @route GET /api/businesses
  * @access Public
  *
- * NEW: cached per (search, limit, skip) combination. This list is hit on
- * basically every app open / home-screen load, so caching it server-side
- * means the Nth user in a given TTL window pays zero Mongo cost.
+ * REWRITTEN: previously cached each (search, limit, skip) page independently.
+ * That's unsafe under pagination — ties in the sort key (lots of businesses
+ * share totalContributions: 0) mean two separate Mongo queries for adjacent
+ * pages aren't guaranteed to agree on ordering, so businesses could fall
+ * between pages and silently disappear, especially once each page result
+ * got cached independently and stopped "self-correcting".
+ *
+ * Fix: sort with a stable tiebreaker (_id), fetch + cache the FULL sorted
+ * list once per search term, and slice pages out of that single cached
+ * array. Every page now comes from the exact same snapshot, so pagination
+ * is always internally consistent. It also makes background batch-loading
+ * on the frontend much faster after the first request, since batch 2, 3, 4…
+ * are then just in-memory slices instead of fresh Mongo queries.
  */
 const getBusinesses = asyncHandler(async (req, res) => {
   const searchTerm = req.query.search ? normaliseQueryKey(req.query.search) : "";
   const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0;
   const skip  = req.query.skip  ? parseInt(req.query.skip,  10) : 0;
 
-  const cacheKey = `${searchTerm}|limit=${limit}|skip=${skip}`;
-  const cached = cacheGet("businessList", cacheKey);
-  if (cached !== undefined) {
-    console.log("✅ Business list cache hit:", cacheKey);
-    return res.status(200).json(cached);
+  // Cache key is just the normalised search term — NOT skip/limit — so every
+  // page for a given search is sliced from one consistent snapshot.
+  const cacheKey = searchTerm;
+
+  let full = cacheGet("businessFullList", cacheKey);
+
+  if (full === undefined) {
+    full = await dedupeInFlight("businessFullList", cacheKey, async () => {
+      const keyword = req.query.search
+        ? {
+            $or: [
+              { name: { $regex: req.query.search, $options: "i" } },
+              { address: { $regex: req.query.search, $options: "i" } },
+              { tags: { $regex: req.query.search, $options: "i" } },
+            ],
+          }
+        : {};
+
+      // _id: 1 as a tiebreaker makes the sort deterministic even when many
+      // documents share the same totalContributions value.
+      const all = await Business.find(keyword)
+        .sort({ totalContributions: -1, _id: 1 })
+        .lean();
+
+      cacheSet("businessFullList", cacheKey, all, BUSINESS_LIST_TTL_MS);
+      return all;
+    });
+  } else {
+    console.log("✅ Business full-list cache hit:", cacheKey || "(all)");
   }
 
-  const result = await dedupeInFlight("businessList", cacheKey, async () => {
-    const keyword = req.query.search
-      ? {
-          $or: [
-            { name: { $regex: req.query.search, $options: "i" } },
-            { address: { $regex: req.query.search, $options: "i" } },
-            { tags: { $regex: req.query.search, $options: "i" } },
-          ],
-        }
-      : {};
+  const total = full.length;
+  const businesses = limit > 0 ? full.slice(skip, skip + limit) : full.slice(skip);
 
-    const [businesses, total] = await Promise.all([
-      Business.find(keyword)
-        .sort({ totalContributions: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      Business.countDocuments(keyword),
-    ]);
-
-    const payload = { businesses, total };
-    cacheSet("businessList", cacheKey, payload, BUSINESS_LIST_TTL_MS);
-    return payload;
-  });
-
-  res.status(200).json(result);
+  res.status(200).json({ businesses, total });
 });
 
 /**
@@ -459,11 +468,9 @@ const getBusinesses = asyncHandler(async (req, res) => {
  * @route GET /api/businesses/:id
  * @access Public
  *
- * NEW: this is the highest-value endpoint to cache — every courier viewing
- * a popular business (mall, restaurant chain, etc.) triggers this same
- * query + comment aggregation + populate chain. Caching it server-side
- * means all of them share one Mongo round trip per TTL window instead of
- * each device paying it individually (which is all AsyncStorage could do).
+ * Cached per businessId — every courier viewing a popular business (mall,
+ * restaurant chain, etc.) shares one Mongo round trip per TTL window instead
+ * of each device paying it individually.
  */
 const getBusinessDetails = asyncHandler(async (req, res) => {
   const businessId = req.params.id;
@@ -619,9 +626,9 @@ const createBusiness = asyncHandler(async (req, res) => {
           lng: req.body.lng ?? null,
         },
       });
-      // NEW: a brand-new business invalidates any cached business *lists*
-      // (search results / home feed) since totals/counts may shift.
-      cacheDeleteByPrefix("businessList", "");
+      // A brand-new business invalidates any cached full lists (search
+      // results / home feed) since the underlying collection changed.
+      cacheDeleteByPrefix("businessFullList", "");
       return res.status(201).json(business);
     } catch (err) {
       if (err.code === 11000) {
@@ -663,7 +670,7 @@ const createBusiness = asyncHandler(async (req, res) => {
       source: "manual",
       tags: [courierType],
     });
-    cacheDeleteByPrefix("businessList", "");
+    cacheDeleteByPrefix("businessFullList", "");
     return res.status(201).json(business);
   } catch (err) {
     if (err.code === 11000) {
@@ -797,10 +804,11 @@ const createFromGlobal = asyncHandler(async (req, res) => {
       ` "${business.name}" (placeId: ${placeId})`
     );
 
-    // NEW: invalidate both this business's detail cache (entryPin/coords
-    // just changed) and the list cache (new business may now appear/rank).
+    // Invalidate both this business's detail cache (entryPin/coords just
+    // changed) and every cached full list (new business may now appear/rank
+    // differently).
     cacheDelete("businessDetail", String(business._id));
-    cacheDeleteByPrefix("businessList", "");
+    cacheDeleteByPrefix("businessFullList", "");
 
     return res.status(wasInserted ? 201 : 200).json(business);
   } catch (err) {
@@ -814,7 +822,7 @@ const createFromGlobal = asyncHandler(async (req, res) => {
         existing.coordinates = coordsDoc;
         await existing.save();
         cacheDelete("businessDetail", String(existing._id));
-        cacheDeleteByPrefix("businessList", "");
+        cacheDeleteByPrefix("businessFullList", "");
         return res.status(200).json(existing);
       }
     }
@@ -861,7 +869,7 @@ const updateEntryPin = asyncHandler(async (req, res) => {
 
   await business.save();
 
-  // NEW: pin just changed — anyone re-opening this business should see it
+  // Pin just changed — anyone re-opening this business should see it
   // immediately, not after the TTL expires.
   cacheDelete("businessDetail", String(business._id));
 
@@ -1287,7 +1295,7 @@ const proxyDirections = asyncHandler(async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// NEW: exported invalidation helper for OTHER controllers (instruction.controller.js)
+// Exported invalidation helper for OTHER controllers (instruction.controller.js)
 // ──────────────────────────────────────────────────────────────────────────────
 // Call this from createInstruction / updateInstruction / likeInstruction /
 // dislikeInstruction after a successful write, passing the business ID the
@@ -1316,5 +1324,5 @@ module.exports = {
   getSearchHistory, addSearchHistory,
   proxyDirections,
   getNearbyBusinesses,
-  invalidateBusinessDetailCache, // NEW
+  invalidateBusinessDetailCache,
 };
