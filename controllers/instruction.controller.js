@@ -6,6 +6,94 @@ const Instruction = require('../models/Instruction');
 const Business = require('../models/Business');
 const User = require('../models/User');
 const Comment = require('../models/Comment');
+// NEW: so writes here also bust the cached getBusinessDetails payload —
+// otherwise a new instruction / edit / vote wouldn't show up on the business
+// detail screen until that cache's own TTL expired.
+const { invalidateBusinessDetailCache } = require('./business.controller');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// IN-MEMORY CACHE (same lightweight pattern as business.controller.js)
+// ──────────────────────────────────────────────────────────────────────────────
+// getInstructionsByBusiness / getInstructionById are read very frequently
+// (every time a courier opens a business or taps into a single instruction),
+// and each one does a populate + a separate comment-count aggregate. Caching
+// the assembled response means every user after the first one in a TTL
+// window gets it instantly with zero Mongo round trip.
+//
+// Writes (create/update/vote) explicitly invalidate the relevant entries
+// instead of waiting out the TTL, so nobody sees stale likes/notes/audio.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const _caches = new Map(); // cacheName -> Map<key, { value, expiresAt }>
+
+function _getCache(name) {
+    if (!_caches.has(name)) _caches.set(name, new Map());
+    return _caches.get(name);
+}
+
+function cacheGet(name, key) {
+    const cache = _getCache(name);
+    const entry = cache.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+        cache.delete(key);
+        return undefined;
+    }
+    return entry.value;
+}
+
+function cacheSet(name, key, value, ttlMs) {
+    const cache = _getCache(name);
+    cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+
+    // Opportunistic cleanup so the Map doesn't grow unbounded.
+    if (cache.size > 500) {
+        const now = Date.now();
+        for (const [k, v] of cache) {
+            if (now > v.expiresAt) cache.delete(k);
+        }
+    }
+}
+
+function cacheDelete(name, key) {
+    _getCache(name).delete(key);
+}
+
+const _inFlight = new Map(); // cacheName:key -> Promise
+
+async function dedupeInFlight(cacheName, key, fn) {
+    const flightKey = `${cacheName}:${key}`;
+    if (_inFlight.has(flightKey)) {
+        return _inFlight.get(flightKey);
+    }
+    const promise = (async () => {
+        try {
+            return await fn();
+        } finally {
+            _inFlight.delete(flightKey);
+        }
+    })();
+    _inFlight.set(flightKey, promise);
+    return promise;
+}
+
+const INSTRUCTIONS_BY_BUSINESS_TTL_MS = 30 * 1000; // 30 seconds
+const INSTRUCTION_DETAIL_TTL_MS = 30 * 1000; // 30 seconds
+
+/**
+ * Clears every cache entry tied to a single instruction: its own detail
+ * cache plus the parent business's instruction-list cache (since that list
+ * embeds the same fields and would otherwise go stale).
+ */
+function invalidateInstructionCaches(instructionId, businessId) {
+    if (instructionId) cacheDelete('instructionDetail', String(instructionId));
+    if (businessId) {
+        cacheDelete('instructionsByBusiness', String(businessId));
+        // The business detail payload also embeds contributions — keep it
+        // in sync too.
+        invalidateBusinessDetailCache(businessId);
+    }
+}
 
 const calculateUserLevel = (totalContributions) => {
     if (totalContributions >= 100) return 10;
@@ -54,23 +142,30 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
         throw new Error('Invalid business ID');
     }
 
-    const instructions = await Instruction.find({ business: businessId })
-        .populate('user', 'name level')
-        .sort({ createdAt: -1 });
+    // ── Cache check ──────────────────────────────────────────────────────────
+    const cached = cacheGet('instructionsByBusiness', businessId);
+    if (cached !== undefined) {
+        console.log('✅ Instructions-by-business cache hit for:', businessId);
+        return res.status(200).json(cached);
+    }
 
-    const instructionIds = instructions.map(i => i._id);
-    const commentCounts = await Comment.aggregate([
-        { $match: { instruction: { $in: instructionIds } } },
-        { $group: { _id: '$instruction', count: { $sum: 1 } } },
-    ]);
+    const payload = await dedupeInFlight('instructionsByBusiness', businessId, async () => {
+        const instructions = await Instruction.find({ business: businessId })
+            .populate('user', 'name level')
+            .sort({ createdAt: -1 });
 
-    const commentCountMap = {};
-    commentCounts.forEach(c => {
-        commentCountMap[c._id.toString()] = c.count;
-    });
+        const instructionIds = instructions.map(i => i._id);
+        const commentCounts = await Comment.aggregate([
+            { $match: { instruction: { $in: instructionIds } } },
+            { $group: { _id: '$instruction', count: { $sum: 1 } } },
+        ]);
 
-    res.status(200).json(
-        instructions.map(i => ({
+        const commentCountMap = {};
+        commentCounts.forEach(c => {
+            commentCountMap[c._id.toString()] = c.count;
+        });
+
+        const result = instructions.map(i => ({
             id: i._id.toString(),
             userId: i.user?._id,
             userName: i.user?.name || 'Anonymous',
@@ -92,8 +187,13 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
             })),
             timestamp: i.createdAt,
             commentCount: commentCountMap[i._id.toString()] || 0,
-        }))
-    );
+        }));
+
+        cacheSet('instructionsByBusiness', businessId, result, INSTRUCTIONS_BY_BUSINESS_TTL_MS);
+        return result;
+    });
+
+    res.status(200).json(payload);
 });
 
 const getInstructionById = asyncHandler(async (req, res) => {
@@ -104,39 +204,61 @@ const getInstructionById = asyncHandler(async (req, res) => {
         throw new Error('Invalid instruction ID');
     }
 
-    const instruction = await Instruction.findById(id)
-        .populate('user', 'name level');
-
-    if (!instruction) {
-        res.status(404);
-        throw new Error('Instruction not found');
+    // ── Cache check ──────────────────────────────────────────────────────────
+    const cached = cacheGet('instructionDetail', id);
+    if (cached !== undefined) {
+        console.log('✅ Instruction detail cache hit for:', id);
+        return res.status(200).json(cached);
     }
 
-    const commentCount = await Comment.countDocuments({ instruction: id });
+    const result = await dedupeInFlight('instructionDetail', id, async () => {
+        const instruction = await Instruction.findById(id)
+            .populate('user', 'name level');
 
-    res.status(200).json({
-        id: instruction._id.toString(),
-        userId: instruction.user?._id?.toString(),
-        userName: instruction.user?.name || 'Anonymous',
-        userLevel: instruction.user?.level || 1,
-        notes: instruction.notes,
-        audioUrl: instruction.audioUrl,
-        audioDuration: instruction.audioDuration,
-        type: instruction.type,
-        category: instruction.category,
-        photos: instruction.photos,
-        videos: instruction.videos,
-        likes: instruction.likes,
-        dislikes: instruction.dislikes,
-        tags: instruction.tags,
-        isVerifiedBusinessInstruction: instruction.isVerifiedBusinessInstruction ?? false,
-        votedUsers: instruction.votedUsers.map(v => ({
-            userId: v.user.toString(),
-            voteType: v.voteType,
-        })),
-        timestamp: instruction.createdAt,
-        commentCount,
+        if (!instruction) {
+            const err = new Error('Instruction not found');
+            err.statusCode = 404;
+            throw err;
+        }
+
+        const commentCount = await Comment.countDocuments({ instruction: id });
+
+        const payload = {
+            id: instruction._id.toString(),
+            userId: instruction.user?._id?.toString(),
+            userName: instruction.user?.name || 'Anonymous',
+            userLevel: instruction.user?.level || 1,
+            notes: instruction.notes,
+            audioUrl: instruction.audioUrl,
+            audioDuration: instruction.audioDuration,
+            type: instruction.type,
+            category: instruction.category,
+            photos: instruction.photos,
+            videos: instruction.videos,
+            likes: instruction.likes,
+            dislikes: instruction.dislikes,
+            tags: instruction.tags,
+            isVerifiedBusinessInstruction: instruction.isVerifiedBusinessInstruction ?? false,
+            votedUsers: instruction.votedUsers.map(v => ({
+                userId: v.user.toString(),
+                voteType: v.voteType,
+            })),
+            timestamp: instruction.createdAt,
+            commentCount,
+        };
+
+        // Only cache successful lookups — never lock in a 404.
+        cacheSet('instructionDetail', id, payload, INSTRUCTION_DETAIL_TTL_MS);
+        return payload;
+    }).catch((err) => {
+        if (err.statusCode === 404) {
+            res.status(404);
+            throw new Error('Instruction not found');
+        }
+        throw err;
     });
+
+    res.status(200).json(result);
 });
 
 const createInstruction = asyncHandler(async (req, res) => {
@@ -208,6 +330,11 @@ const createInstruction = asyncHandler(async (req, res) => {
         await session.commitTransaction();
         session.endSession();
 
+        // NEW: a brand-new instruction invalidates this business's instruction
+        // list + the cached business-detail payload, so it shows up immediately
+        // for the next person who opens this business.
+        invalidateInstructionCaches(null, businessId);
+
         res.status(201).json(instruction);
     } catch (error) {
         await session.abortTransaction();
@@ -256,6 +383,11 @@ const updateInstruction = asyncHandler(async (req, res) => {
     if (videos !== undefined) instruction.videos = videos;
 
     const updated = await instruction.save();
+
+    // NEW: edited notes/audio/media must be visible immediately — bust this
+    // instruction's own cache, its parent business's instruction list, and
+    // the business-detail cache (which embeds the same contribution data).
+    invalidateInstructionCaches(updated._id, updated.business);
 
     res.status(200).json({
         id: updated._id.toString(),
@@ -331,6 +463,11 @@ const handleVote = async (req, res, voteAction) => {
 
         await session.commitTransaction();
         session.endSession();
+
+        // NEW: vote counts changed — invalidate so the next read (this
+        // instruction's detail, its business's list, and the business
+        // detail page) reflects the new likes/dislikes immediately.
+        invalidateInstructionCaches(updated._id, updated.business);
 
         res.status(200).json({
             id: updated._id.toString(),
