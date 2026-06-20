@@ -1175,7 +1175,11 @@ const proxyDirections = asyncHandler(async (req, res) => {
     }),
   });
 
+ 
+
   const data = await response.json();
+
+   console.log("[proxyDirections] full response body:", JSON.stringify(data, null, 2));
 
   console.log("[proxyDirections] Google status:", response.status);       // ADD
   console.log("[proxyDirections] Google response:", JSON.stringify(data)); // ADD
