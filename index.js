@@ -13,23 +13,7 @@ const PORT = process.env.PORT || 5000;
 // ==============================
 // CORS Configuration
 // ==============================
-app.use(cors({
-  origin: function (origin, callback) {
-    const allowed = [
-      'https://cns-backend-production.up.railway.app',
-      'https://cns-business-and-instruction-upload.vercel.app',
-    ];
-    // Allow requests with no origin (mobile apps, Postman, etc.)
-    if (!origin || allowed.includes(origin) || origin.endsWith('.vercel.app')) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-upload-key', 'x-business-name'],
-  credentials: true
-}));
+app.use(cors());
 
 // ==============================
 // Body parsers
