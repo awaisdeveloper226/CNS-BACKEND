@@ -5,11 +5,10 @@ const Business = require("../models/Business");
 const Instruction = require("../models/Instruction");
 const Comment = require("../models/Comment");
 const User = require("../models/User");
-//GOOGLE_PLACES_API_KEY
 
 const GOOGLE_API_KEY = process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
-const GOOGLE_AHMED_KEY_FOR_GEOCODING=process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
-const ROUTING_API=process.env.ROUTING_API;
+const GOOGLE_AHMED_KEY_FOR_GEOCODING = process.env.GOOGLE_AHMED_KEY_FOR_GEOCODING;
+const ROUTING_API = process.env.ROUTING_API;
 const MAX_HISTORY = 5;
 
 const normaliseSource = (raw) => {
@@ -19,22 +18,10 @@ const normaliseSource = (raw) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // IN-MEMORY CACHE + IN-FLIGHT REQUEST DEDUP
-// ──────────────────────────────────────────────────────────────────────────────
-// Goal: cut down on Google Places "SearchTextRequest" / "searchNearby" calls
-// (low daily quotas) AND on repeated MongoDB reads for hot business/instruction
-// pages — every user hitting the same business benefits from one shared cache
-// instead of each device re-querying Mongo independently.
-//
-// - cacheGet/cacheSet: simple Map-based TTL cache, scoped per cache name.
-// - cacheDelete: explicit invalidation, used after writes so edits show up
-//   immediately instead of waiting out the TTL.
-// - dedupeInFlight: if two requests for the *same* key arrive while a
-//   DB/Google call is still pending, the second one waits for and reuses the
-//   first request's result instead of firing a duplicate call.
 // ══════════════════════════════════════════════════════════════════════════════
 
-const _caches = new Map(); // cacheName -> Map<key, { value, expiresAt }>
-const _inFlight = new Map(); // cacheName:key -> Promise
+const _caches = new Map();
+const _inFlight = new Map();
 
 function _getCache(name) {
   if (!_caches.has(name)) _caches.set(name, new Map());
@@ -55,9 +42,6 @@ function cacheGet(name, key) {
 function cacheSet(name, key, value, ttlMs) {
   const cache = _getCache(name);
   cache.set(key, { value, expiresAt: Date.now() + ttlMs });
-
-  // Opportunistic cleanup so the Map doesn't grow unbounded on long-lived
-  // Render instances. Cheap O(n) sweep, only runs occasionally.
   if (cache.size > 500) {
     const now = Date.now();
     for (const [k, v] of cache) {
@@ -66,20 +50,10 @@ function cacheSet(name, key, value, ttlMs) {
   }
 }
 
-/**
- * Explicitly removes a single cache entry. Used right after a write so the
- * next read is forced to go back to Mongo instead of serving stale data
- * until the TTL naturally expires.
- */
 function cacheDelete(name, key) {
   _getCache(name).delete(key);
 }
 
-/**
- * Clears every entry in a named cache whose key starts with `prefix`.
- * Useful for list-style caches (e.g. getBusinesses) where any business
- * mutation could affect many cached pages/search results.
- */
 function cacheDeleteByPrefix(name, prefix) {
   const cache = _getCache(name);
   for (const k of cache.keys()) {
@@ -87,15 +61,9 @@ function cacheDeleteByPrefix(name, prefix) {
   }
 }
 
-/**
- * Runs `fn` only once per unique (cacheName, key) while a previous call is
- * still pending — concurrent callers await the same in-flight promise.
- */
 async function dedupeInFlight(cacheName, key, fn) {
   const flightKey = `${cacheName}:${key}`;
-  if (_inFlight.has(flightKey)) {
-    return _inFlight.get(flightKey);
-  }
+  if (_inFlight.has(flightKey)) return _inFlight.get(flightKey);
   const promise = (async () => {
     try {
       return await fn();
@@ -107,36 +75,44 @@ async function dedupeInFlight(cacheName, key, fn) {
   return promise;
 }
 
-/**
- * Normalises a free-text search query into a stable cache key:
- * lowercased, trimmed, collapsed whitespace.
- */
 function normaliseQueryKey(q) {
   return q.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-/**
- * Rounds coordinates to ~1.1km precision (3 decimals) so that nearby
- * requests from roughly the same area share a cache entry instead of
- * each missing by a few meters.
- */
 function roundCoord(n) {
   return Math.round(n * 1000) / 1000;
 }
 
-const PLACES_SEARCH_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const NEARBY_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const REVERSE_GEOCODE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+// ── Haversine distance helper ─────────────────────────────────────────────────
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLng = (lng2 - lng1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLng / 2) ** 2;
+  return Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+}
 
-// ── TTLs for DB-backed business caching ─────────────────────────────────────
-const BUSINESS_DETAIL_TTL_MS = 45 * 1000; // 45 seconds
-const BUSINESS_LIST_TTL_MS = 30 * 1000; // 30 seconds
+const PLACES_SEARCH_TTL_MS    = 15 * 60 * 1000; // 15 minutes
+const NEARBY_TTL_MS           = 10 * 60 * 1000; // 10 minutes
+const REVERSE_GEOCODE_TTL_MS  = 24 * 60 * 60 * 1000; // 24 hours
+const BUSINESS_DETAIL_TTL_MS  = 45 * 1000;      // 45 seconds
+const BUSINESS_LIST_TTL_MS    = 30 * 1000;      // 30 seconds
 
-/**
- * @desc  Search places via Nominatim (OpenStreetMap) — free, no API key required
- * @route GET /api/businesses/places-search?q=KFC+Lahore
- * @access Public
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// PLACES SEARCH (Google Text Search)
+// ──────────────────────────────────────────────────────────────────────────────
+// CHANGES:
+//   • Removed the 100km hard filter — ALL results are returned regardless of
+//     distance. Distance is attached as metadata (_distanceKm) and used by the
+//     frontend scoring engine to rank results, not to exclude them.
+//   • locationBias is still forwarded so Google ranks nearby results higher,
+//     but we no longer throw away anything based on distance.
+//   • Cache key unchanged — still stable per (query, coarse-location).
+// ══════════════════════════════════════════════════════════════════════════════
 const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   const { q, lat, lng } = req.query;
 
@@ -145,10 +121,14 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   }
 
   const query = q.trim();
-  console.log("🔍 Google Places search for query:", query, lat && lng ? `(biased to ${lat},${lng})` : "(no location bias)");
+  console.log(
+    "🔍 Google Places search:",
+    query,
+    lat && lng ? `(bias ${lat},${lng})` : "(no bias)"
+  );
 
   if (!GOOGLE_API_KEY) {
-    console.error("❌ Google Places API key missing in environment variables.");
+    console.error("❌ Google Places API key missing");
     return res.status(500).json({ message: "Server configuration error: Missing API Key" });
   }
 
@@ -163,12 +143,8 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
     }
   }
 
-  const FILTER_RADIUS_METERS = 100000.0; // 100 km hard filter (applied after fetch)
-  const BIAS_RADIUS_METERS = 50000.0;    // 50 km — Google's locationBias max
+  const BIAS_RADIUS_METERS = 50000.0; // 50km soft bias — Google ranks nearby higher
 
-  // ── Cache key: normalised query + coarse-rounded location bias ────────────
-  // Same query text from roughly the same area reuses the cached result
-  // instead of hitting Google again.
   const cacheKey =
     normaliseQueryKey(query) +
     (parsedLat !== null && parsedLng !== null
@@ -177,21 +153,18 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
 
   const cached = cacheGet("placesSearch", cacheKey);
   if (cached !== undefined) {
-    console.log("✅ Places search cache hit for:", query);
+    console.log("✅ Places cache hit:", query);
     return res.status(200).json(cached);
   }
 
   try {
     const results = await dedupeInFlight("placesSearch", cacheKey, async () => {
-      const url = "https://places.googleapis.com/v1/places:searchText";
-
       const requestBody = {
         textQuery: query,
         languageCode: "en",
       };
 
-      // Soft bias toward the user's area — Google ranks nearby places higher
-      // but can still return results outside the radius, so we hard-filter below.
+      // Soft bias — improves ranking without restricting results
       if (parsedLat !== null && parsedLng !== null) {
         requestBody.locationBias = {
           circle: {
@@ -201,12 +174,13 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
         };
       }
 
-      const response = await fetch(url, {
+      const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "X-Goog-Api-Key": GOOGLE_API_KEY,
-          "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.types",
+          "X-Goog-FieldMask":
+            "places.id,places.displayName,places.formattedAddress,places.location,places.types",
         },
         body: JSON.stringify(requestBody),
       });
@@ -222,47 +196,34 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
 
       const data = await response.json();
       const places = data.places || [];
-      console.log(`✅ Google Places returned ${places.length} results (pre-filter)`);
+      console.log(`✅ Google Places: ${places.length} results (no hard filter)`);
 
-      let mapped = places.map((place) => ({
-        placeId: place.id,
-        name: place.displayName?.text || "Unknown Name",
-        address: place.formattedAddress || "Address not available",
-        source: "google",
-        type: "Standalone",
-        totalContributions: 0,
-        isVerified: false,
-        lat: place.location?.latitude ?? null,
-        lng: place.location?.longitude ?? null,
-      }));
+      // Attach _distanceKm as metadata for client-side ranking.
+      // No filtering — even results 500km away are returned; the scoring
+      // engine on the frontend penalises distance rather than discarding.
+      const mapped = places.map((place) => {
+        const rLat = place.location?.latitude ?? null;
+        const rLng = place.location?.longitude ?? null;
+        const _distanceKm =
+          parsedLat !== null && parsedLng !== null && rLat !== null && rLng !== null
+            ? haversineKm(parsedLat, parsedLng, rLat, rLng)
+            : null;
 
-      // ── Hard 100km filter ────────────────────────────────────────────────
-      // locationBias is only a ranking hint — Google can still return results
-      // far outside it. We drop anything beyond RADIUS_METERS when we have
-      // the user's coordinates.
-      if (parsedLat !== null && parsedLng !== null) {
-        mapped = mapped
-          .map((r) => {
-            if (r.lat == null || r.lng == null) return { ...r, _distanceKm: null };
-            const dLat = (r.lat - parsedLat) * (Math.PI / 180);
-            const dLng = (r.lng - parsedLng) * (Math.PI / 180);
-            const a =
-              Math.sin(dLat / 2) ** 2 +
-              Math.cos(parsedLat * (Math.PI / 180)) *
-                Math.cos(r.lat * (Math.PI / 180)) *
-                Math.sin(dLng / 2) ** 2;
-            const distanceKm =
-              Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
-            return { ...r, _distanceKm: distanceKm };
-          })
-          .filter((r) => r._distanceKm != null && r._distanceKm * 1000 <= FILTER_RADIUS_METERS);
+        return {
+          placeId: place.id,
+          name: place.displayName?.text || "Unknown Name",
+          address: place.formattedAddress || "Address not available",
+          source: "google",
+          type: "Standalone",
+          totalContributions: 0,
+          isVerified: false,
+          lat: rLat,
+          lng: rLng,
+          _distanceKm,
+        };
+      });
 
-        console.log(`✅ ${mapped.length} results within 100km`);
-      }
-
-      // Cache the final, filtered result set.
       cacheSet("placesSearch", cacheKey, mapped, PLACES_SEARCH_TTL_MS);
-
       return mapped;
     });
 
@@ -276,11 +237,9 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   }
 });
 
-/**
- * @desc  Reverse geocode lat/lng → address
- * @route GET /api/businesses/geocode?lat=X&lng=Y
- * @access Public
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// REVERSE GEOCODE
+// ══════════════════════════════════════════════════════════════════════════════
 const reverseGeocode = asyncHandler(async (req, res) => {
   const { lat, lng } = req.query;
 
@@ -288,15 +247,12 @@ const reverseGeocode = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "lat and lng query params are required" });
   }
 
-  console.log(`[Geocode] Fetching for lat=${lat}, lng=${lng}`);
+  console.log(`[Geocode] lat=${lat}, lng=${lng}`);
 
-  // ── Cache key: coordinates rounded to ~110m precision (4 decimals) ────────
-  // Reverse geocoding the "same spot" repeatedly (e.g. courier re-opening the
-  // map picker near the same location) reuses the cached address.
   const cacheKey = `${roundCoord(parseFloat(lat) * 10) / 10},${roundCoord(parseFloat(lng) * 10) / 10}`;
   const cached = cacheGet("reverseGeocode", cacheKey);
   if (cached !== undefined) {
-    console.log("✅ Reverse geocode cache hit for:", cacheKey);
+    console.log("✅ Reverse geocode cache hit:", cacheKey);
     return res.status(200).json(cached);
   }
 
@@ -329,27 +285,22 @@ const reverseGeocode = asyncHandler(async (req, res) => {
         });
         const nearbyData = await nearbyRes.json();
         nearbyName = nearbyData.places?.[0]?.displayName?.text ?? null;
-      } catch (e) {
-        console.log("[Nearby Verification Failed] Continuing with geocode data.");
+      } catch {
+        // non-fatal
       }
 
       const payload = { ...geocodeData, nearbyName };
-
-      // Only cache successful geocodes — don't lock in a transient failure.
       if (geocodeData.status === "OK") {
         cacheSet("reverseGeocode", cacheKey, payload, REVERSE_GEOCODE_TTL_MS);
       }
-
       return { payload, status: 200 };
     }
 
-    console.log("[Geocode] No Google key — falling back to Nominatim reverse geocode");
+    // Nominatim fallback
     try {
       const url =
         `https://nominatim.openstreetmap.org/reverse` +
-        `?lat=${lat}&lon=${lng}` +
-        `&format=json` +
-        `&addressdetails=1`;
+        `?lat=${lat}&lon=${lng}&format=json&addressdetails=1`;
 
       const nominatimRes = await fetch(url, {
         headers: {
@@ -358,13 +309,10 @@ const reverseGeocode = asyncHandler(async (req, res) => {
         },
       });
 
-      if (!nominatimRes.ok) {
-        return { payload: { message: "Reverse geocode failed" }, status: 502 };
-      }
+      if (!nominatimRes.ok) return { payload: { message: "Reverse geocode failed" }, status: 502 };
 
       const data = await nominatimRes.json();
       const addr = data.address || {};
-
       const formatted =
         [
           addr.road || addr.pedestrian,
@@ -381,9 +329,7 @@ const reverseGeocode = asyncHandler(async (req, res) => {
         results: [
           {
             formatted_address: formatted,
-            geometry: {
-              location: { lat: parseFloat(lat), lng: parseFloat(lng) },
-            },
+            geometry: { location: { lat: parseFloat(lat), lng: parseFloat(lng) } },
           },
         ],
         nearbyName: data.name || data.display_name?.split(",")[0] || null,
@@ -391,7 +337,6 @@ const reverseGeocode = asyncHandler(async (req, res) => {
       };
 
       cacheSet("reverseGeocode", cacheKey, payload, REVERSE_GEOCODE_TTL_MS);
-
       return { payload, status: 200 };
     } catch (error) {
       console.error("❌ Nominatim reverse geocode error:", error);
@@ -402,32 +347,20 @@ const reverseGeocode = asyncHandler(async (req, res) => {
   return res.status(result.status).json(result.payload);
 });
 
-/**
- * @desc  Get all businesses
- * @route GET /api/businesses
- * @access Public
- *
- * REWRITTEN: previously cached each (search, limit, skip) page independently.
- * That's unsafe under pagination — ties in the sort key (lots of businesses
- * share totalContributions: 0) mean two separate Mongo queries for adjacent
- * pages aren't guaranteed to agree on ordering, so businesses could fall
- * between pages and silently disappear, especially once each page result
- * got cached independently and stopped "self-correcting".
- *
- * Fix: sort with a stable tiebreaker (_id), fetch + cache the FULL sorted
- * list once per search term, and slice pages out of that single cached
- * array. Every page now comes from the exact same snapshot, so pagination
- * is always internally consistent. It also makes background batch-loading
- * on the frontend much faster after the first request, since batch 2, 3, 4…
- * are then just in-memory slices instead of fresh Mongo queries.
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// GET ALL BUSINESSES
+// ──────────────────────────────────────────────────────────────────────────────
+// CHANGES:
+//   • Now returns coordinates on every record so the frontend can compute
+//     distance and incorporate it into the unified relevance ranking.
+//   • Still caches the full sorted list and slices pages from it for
+//     pagination consistency.
+// ══════════════════════════════════════════════════════════════════════════════
 const getBusinesses = asyncHandler(async (req, res) => {
   const searchTerm = req.query.search ? normaliseQueryKey(req.query.search) : "";
   const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0;
   const skip  = req.query.skip  ? parseInt(req.query.skip,  10) : 0;
 
-  // Cache key is just the normalised search term — NOT skip/limit — so every
-  // page for a given search is sliced from one consistent snapshot.
   const cacheKey = searchTerm;
 
   let full = cacheGet("businessFullList", cacheKey);
@@ -437,16 +370,16 @@ const getBusinesses = asyncHandler(async (req, res) => {
       const keyword = req.query.search
         ? {
             $or: [
-              { name: { $regex: req.query.search, $options: "i" } },
+              { name:    { $regex: req.query.search, $options: "i" } },
               { address: { $regex: req.query.search, $options: "i" } },
-              { tags: { $regex: req.query.search, $options: "i" } },
+              { tags:    { $regex: req.query.search, $options: "i" } },
             ],
           }
         : {};
 
-      // _id: 1 as a tiebreaker makes the sort deterministic even when many
-      // documents share the same totalContributions value.
+      // Select coordinates explicitly so the frontend can rank by distance
       const all = await Business.find(keyword)
+        .select("name address type totalContributions isVerified coordinates placeId tags entryPin")
         .sort({ totalContributions: -1, _id: 1 })
         .lean();
 
@@ -454,7 +387,7 @@ const getBusinesses = asyncHandler(async (req, res) => {
       return all;
     });
   } else {
-    console.log("✅ Business full-list cache hit:", cacheKey || "(all)");
+    console.log("✅ Business list cache hit:", cacheKey || "(all)");
   }
 
   const total = full.length;
@@ -463,27 +396,19 @@ const getBusinesses = asyncHandler(async (req, res) => {
   res.status(200).json({ businesses, total });
 });
 
-/**
- * @desc  Get single business by ID with its instructions
- * @route GET /api/businesses/:id
- * @access Public
- *
- * Cached per businessId — every courier viewing a popular business (mall,
- * restaurant chain, etc.) shares one Mongo round trip per TTL window instead
- * of each device paying it individually.
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// GET BUSINESS DETAILS
+// ══════════════════════════════════════════════════════════════════════════════
 const getBusinessDetails = asyncHandler(async (req, res) => {
   const businessId = req.params.id;
 
   const cached = cacheGet("businessDetail", businessId);
   if (cached !== undefined) {
-    console.log("✅ Business detail cache hit for:", businessId);
+    console.log("✅ Business detail cache hit:", businessId);
     return res.status(200).json(cached);
   }
 
   const detailedBusiness = await dedupeInFlight("businessDetail", businessId, async () => {
-    console.log("🔍 Fetching business details for ID:", businessId);
-
     const business = await Business.findById(businessId)
       .lean()
       .populate({
@@ -522,7 +447,6 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
       commentCountMap[c._id.toString()] = c.count;
     });
 
-    // ── Lazy coordinate backfill ───────────────────────────────────────────
     let coordinates = business.coordinates;
     if (!coordinates?.lat && business.address) {
       try {
@@ -579,9 +503,7 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
       })),
     };
 
-    // Only cache successful lookups — never lock in a 404/error.
     cacheSet("businessDetail", businessId, payload, BUSINESS_DETAIL_TTL_MS);
-
     return payload;
   }).catch((err) => {
     if (err.statusCode === 404) {
@@ -594,11 +516,9 @@ const getBusinessDetails = asyncHandler(async (req, res) => {
   res.status(200).json(detailedBusiness);
 });
 
-/**
- * @desc  Create new business
- * @route POST /api/businesses
- * @access Private
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// CREATE BUSINESS
+// ══════════════════════════════════════════════════════════════════════════════
 const createBusiness = asyncHandler(async (req, res) => {
   const { name, address, type, courierType, placeId, source } = req.body;
 
@@ -609,9 +529,7 @@ const createBusiness = asyncHandler(async (req, res) => {
 
   if (placeId) {
     const existing = await Business.findOne({ placeId });
-    if (existing) {
-      return res.status(200).json(existing);
-    }
+    if (existing) return res.status(200).json(existing);
 
     try {
       const business = await Business.create({
@@ -626,8 +544,6 @@ const createBusiness = asyncHandler(async (req, res) => {
           lng: req.body.lng ?? null,
         },
       });
-      // A brand-new business invalidates any cached full lists (search
-      // results / home feed) since the underlying collection changed.
       cacheDeleteByPrefix("businessFullList", "");
       return res.status(201).json(business);
     } catch (err) {
@@ -652,15 +568,11 @@ const createBusiness = asyncHandler(async (req, res) => {
   const validCourierTypes = ["Courier/Parcel Delivery", "Food Delivery", "Both"];
   if (!validCourierTypes.includes(courierType)) {
     res.status(400);
-    throw new Error(
-      `Invalid courier type. Must be one of: ${validCourierTypes.join(", ")}`
-    );
+    throw new Error(`Invalid courier type. Must be one of: ${validCourierTypes.join(", ")}`);
   }
 
   const existing = await Business.findOne({ name, address });
-  if (existing) {
-    return res.status(200).json(existing);
-  }
+  if (existing) return res.status(200).json(existing);
 
   try {
     const business = await Business.create({
@@ -683,68 +595,32 @@ const createBusiness = asyncHandler(async (req, res) => {
   }
 });
 
-/**
- * @desc  Upsert a global (externally sourced) business into the local CNS
- *        database and stamp its courier entry pin in one atomic operation.
- *
- *        Called when a courier opens a "global" search result and drops an
- *        entry pin for the first time. After this call the business becomes
- *        a first-class local record with a real MongoDB _id, and subsequent
- *        pin edits use the normal PATCH /api/businesses/:id/entry-pin route.
- *
- * @route POST /api/businesses/from-global
- * @access Public (community editable)
- *
- * Body:
- *   placeId      string              (required) external place identifier
- *   name         string              (required)
- *   address      string              (required)
- *   type         string              'Mall' | 'Standalone' | 'Other'
- *   source       string              'nominatim' | 'manual' | 'foursquare'
- *   coordinates  { lat, lng } | null
- *   entryPin     { lat, lng, label, updatedBy }   (required)
- *
- * Response: the full Business document (201 on insert, 200 on update)
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// CREATE FROM GLOBAL
+// ══════════════════════════════════════════════════════════════════════════════
 const createFromGlobal = asyncHandler(async (req, res) => {
-  const {
-    placeId,
-    name,
-    address,
-    type,
-    source,
-    coordinates,
-    entryPin,
-  } = req.body;
+  const { placeId, name, address, type, source, coordinates, entryPin } = req.body;
 
-  // ── Validate ─────────────────────────────────────────────────────────────
   if (!placeId || typeof placeId !== "string" || !placeId.trim()) {
-    res.status(400);
-    throw new Error("placeId is required");
+    res.status(400); throw new Error("placeId is required");
   }
   if (!name || typeof name !== "string" || !name.trim()) {
-    res.status(400);
-    throw new Error("name is required");
+    res.status(400); throw new Error("name is required");
   }
   if (!address || typeof address !== "string" || !address.trim()) {
-    res.status(400);
-    throw new Error("address is required");
+    res.status(400); throw new Error("address is required");
   }
   if (!entryPin || entryPin.lat == null || entryPin.lng == null) {
-    res.status(400);
-    throw new Error("entryPin with lat/lng is required");
+    res.status(400); throw new Error("entryPin with lat/lng is required");
   }
   if (typeof entryPin.lat !== "number" || typeof entryPin.lng !== "number") {
-    res.status(400);
-    throw new Error("entryPin lat and lng must be numbers");
+    res.status(400); throw new Error("entryPin lat and lng must be numbers");
   }
 
   const validTypes = ["Mall", "Standalone", "Other"];
-  const safeType = validTypes.includes(type) ? type : "Other";
-
+  const safeType   = validTypes.includes(type) ? type : "Other";
   const safeSource = normaliseSource(source);
 
-  // ── Build entryPin subdoc ─────────────────────────────────────────────────
   const pinDoc = {
     lat: entryPin.lat,
     lng: entryPin.lng,
@@ -753,16 +629,11 @@ const createFromGlobal = asyncHandler(async (req, res) => {
     updatedAt: new Date(),
   };
 
-  // ── Coordinates ───────────────────────────────────────────────────────────
   const coordsDoc =
     coordinates?.lat != null && coordinates?.lng != null
       ? { lat: coordinates.lat, lng: coordinates.lng }
       : { lat: null, lng: null };
 
-  // ── Upsert by placeId ─────────────────────────────────────────────────────
-  // $setOnInsert fires only when a new document is created.
-  // $set fires on both insert and update — always refreshes pin + coords.
-  let wasInserted = false;
   try {
     const doc = await Business.findOneAndUpdate(
       { placeId: placeId.trim() },
@@ -777,48 +648,33 @@ const createFromGlobal = asyncHandler(async (req, res) => {
           tags: [],
           contributions: [],
         },
-        $set: {
-          entryPin: pinDoc,
-          coordinates: coordsDoc,
-        },
+        $set: { entryPin: pinDoc, coordinates: coordsDoc },
       },
       {
         new: true,
         upsert: true,
         runValidators: true,
         setDefaultsOnInsert: true,
-        // rawResult lets us detect whether it was an insert or an update
         includeResultMetadata: true,
-      },
+      }
     );
 
-    // Mongoose returns { value: doc, lastErrorObject: { updatedExisting } }
-    // when includeResultMetadata is true
-    const business = doc.value ?? doc;
-    wasInserted = doc.lastErrorObject
-      ? !doc.lastErrorObject.updatedExisting
-      : false;
+    const business   = doc.value ?? doc;
+    const wasInserted = doc.lastErrorObject ? !doc.lastErrorObject.updatedExisting : false;
 
     console.log(
-      `[from-global] ${wasInserted ? "✨ Created" : "🔄 Updated"} business` +
-      ` "${business.name}" (placeId: ${placeId})`
+      `[from-global] ${wasInserted ? "✨ Created" : "🔄 Updated"} "${business.name}" (placeId: ${placeId})`
     );
 
-    // Invalidate both this business's detail cache (entryPin/coords just
-    // changed) and every cached full list (new business may now appear/rank
-    // differently).
     cacheDelete("businessDetail", String(business._id));
     cacheDeleteByPrefix("businessFullList", "");
 
     return res.status(wasInserted ? 201 : 200).json(business);
   } catch (err) {
-    // Race condition: two requests upserted simultaneously → duplicate key
     if (err.code === 11000) {
-      console.log(`[from-global] Duplicate key race — fetching existing record`);
       const existing = await Business.findOne({ placeId: placeId.trim() });
       if (existing) {
-        // Still apply the pin to whichever doc won the race
-        existing.entryPin = pinDoc;
+        existing.entryPin   = pinDoc;
         existing.coordinates = coordsDoc;
         await existing.save();
         cacheDelete("businessDetail", String(existing._id));
@@ -830,32 +686,24 @@ const createFromGlobal = asyncHandler(async (req, res) => {
   }
 });
 
-/**
- * @desc  Save / update / clear the courier entry pin for a business
- * @route PATCH /api/businesses/:id/entry-pin
- * @access Public (community editable)
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// UPDATE ENTRY PIN
+// ══════════════════════════════════════════════════════════════════════════════
 const updateEntryPin = asyncHandler(async (req, res) => {
   const { lat, lng, label, updatedBy } = req.body;
-
   const isClearing = lat === null && lng === null;
 
   if (!isClearing) {
     if (typeof lat !== "number" || typeof lng !== "number") {
-      res.status(400);
-      throw new Error("lat and lng must be numbers (or both null to clear)");
+      res.status(400); throw new Error("lat and lng must be numbers (or both null to clear)");
     }
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-      res.status(400);
-      throw new Error("lat/lng out of valid range");
+      res.status(400); throw new Error("lat/lng out of valid range");
     }
   }
 
   const business = await Business.findById(req.params.id);
-  if (!business) {
-    res.status(404);
-    throw new Error("Business not found");
-  }
+  if (!business) { res.status(404); throw new Error("Business not found"); }
 
   business.entryPin = isClearing
     ? { lat: null, lng: null, label: "", updatedBy: "", updatedAt: null }
@@ -868,9 +716,6 @@ const updateEntryPin = asyncHandler(async (req, res) => {
       };
 
   await business.save();
-
-  // Pin just changed — anyone re-opening this business should see it
-  // immediately, not after the TTL expires.
   cacheDelete("businessDetail", String(business._id));
 
   res.status(200).json({
@@ -879,12 +724,153 @@ const updateEntryPin = asyncHandler(async (req, res) => {
   });
 });
 
-/**
- * Builds a list of progressively simplified address strings to try with Nominatim.
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// NEARBY BUSINESSES
+// ══════════════════════════════════════════════════════════════════════════════
+const getNearbyBusinesses = asyncHandler(async (req, res) => {
+  const { lat, lng, limit } = req.query;
+
+  if (!lat || !lng) return res.status(400).json({ message: "lat and lng are required" });
+
+  const parsedLat   = parseFloat(lat);
+  const parsedLng   = parseFloat(lng);
+  const parsedLimit = Math.min(parseInt(limit, 10) || 8, 20);
+
+  if (isNaN(parsedLat) || isNaN(parsedLng)) {
+    return res.status(400).json({ message: "lat and lng must be valid numbers" });
+  }
+  if (!GOOGLE_API_KEY) {
+    return res.status(500).json({ message: "Server configuration error: Missing API Key" });
+  }
+
+  const cacheKey = `${roundCoord(parsedLat * 10) / 10},${roundCoord(parsedLng * 10) / 10}|${parsedLimit}`;
+  const cached   = cacheGet("nearbyBusinesses", cacheKey);
+  if (cached !== undefined) {
+    console.log("✅ Nearby cache hit:", cacheKey);
+    return res.status(200).json(cached);
+  }
+
+  try {
+    const results = await dedupeInFlight("nearbyBusinesses", cacheKey, async () => {
+      const response = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": GOOGLE_API_KEY,
+          "X-Goog-FieldMask":
+            "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.businessStatus",
+        },
+        body: JSON.stringify({
+          locationRestriction: {
+            circle: {
+              center: { latitude: parsedLat, longitude: parsedLng },
+              radius: 1000.0,
+            },
+          },
+          includedTypes: [
+            "store", "restaurant", "shopping_mall", "supermarket", "pharmacy",
+            "bank", "hospital", "gym", "cafe", "clothing_store", "convenience_store",
+            "department_store", "electronics_store", "furniture_store",
+            "home_goods_store", "jewelry_store", "shoe_store", "bakery",
+            "fast_food_restaurant",
+          ],
+          maxResultCount: parsedLimit,
+          languageCode: "en",
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`❌ Google Nearby error ${response.status}:`, errText);
+        const err = new Error("Nearby search failed");
+        err.statusCode = 502;
+        throw err;
+      }
+
+      const data   = await response.json();
+      const places = data.places || [];
+      console.log(`✅ Google Nearby: ${places.length} results`);
+
+      const mapped = places.map((place) => {
+        const placeLat   = place.location?.latitude  ?? parsedLat;
+        const placeLng   = place.location?.longitude ?? parsedLng;
+        const distanceKm = haversineKm(parsedLat, parsedLng, placeLat, placeLng);
+
+        return {
+          placeId: place.id,
+          name: place.displayName?.text || "Unknown",
+          address: place.formattedAddress || "Address not available",
+          source: "google",
+          type: "Standalone",
+          totalContributions: 0,
+          isVerified: false,
+          lat: placeLat,
+          lng: placeLng,
+          _distanceKm: distanceKm,
+          _fromFoursquare: true,
+        };
+      });
+
+      mapped.sort((a, b) => a._distanceKm - b._distanceKm);
+      cacheSet("nearbyBusinesses", cacheKey, mapped, NEARBY_TTL_MS);
+      return mapped;
+    });
+
+    return res.status(200).json(results);
+  } catch (error) {
+    if (error.statusCode === 502) {
+      return res.status(502).json({ message: "Nearby search failed" });
+    }
+    console.error("❌ Google Nearby fetch error:", error);
+    return res.status(502).json({ message: "Nearby search service error" });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SEARCH HISTORY
+// ══════════════════════════════════════════════════════════════════════════════
+const getSearchHistory = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id).select("searchHistory").lean();
+  if (!user) { res.status(404); throw new Error("User not found"); }
+
+  const history = (user.searchHistory ?? [])
+    .sort((a, b) => new Date(b.searchedAt) - new Date(a.searchedAt))
+    .slice(0, MAX_HISTORY)
+    .map((h) => h.query);
+
+  res.status(200).json({ history });
+});
+
+const addSearchHistory = asyncHandler(async (req, res) => {
+  const { query } = req.body;
+  if (!query || typeof query !== "string" || !query.trim()) {
+    res.status(400); throw new Error("query is required");
+  }
+
+  const trimmed = query.trim();
+
+  await User.findByIdAndUpdate(req.user._id, {
+    $pull: { searchHistory: { query: { $regex: `^${trimmed}$`, $options: "i" } } },
+  });
+
+  await User.findByIdAndUpdate(req.user._id, {
+    $push: {
+      searchHistory: {
+        $each:  [{ query: trimmed, searchedAt: new Date() }],
+        $sort:  { searchedAt: -1 },
+        $slice: MAX_HISTORY,
+      },
+    },
+  });
+
+  res.status(200).json({ message: "Search history updated" });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BACKFILL COORDINATES (admin utility)
+// ══════════════════════════════════════════════════════════════════════════════
 function buildAddressVariants(address) {
   const variants = [address];
-
   const parts = address.split(",").map((p) => p.trim()).filter(Boolean);
 
   if (/shopping\s*cent(re|er)|mall|plaza|arcade|centre/i.test(parts[0])) {
@@ -904,12 +890,8 @@ function buildAddressVariants(address) {
 
   if (parts.length > 2) {
     variants.push(parts.slice(-2).join(", "));
-    const streetPart = parts.find((p) =>
-      /\d/.test(p) && !/^[A-Z]-?\d/.test(p)
-    );
-    if (streetPart) {
-      variants.push([streetPart, ...parts.slice(-2)].join(", "));
-    }
+    const streetPart = parts.find((p) => /\d/.test(p) && !/^[A-Z]-?\d/.test(p));
+    if (streetPart) variants.push([streetPart, ...parts.slice(-2)].join(", "));
   }
 
   const roadMatch = address.match(/([A-Za-z\s]+ Rd|[A-Za-z\s]+ St|[A-Za-z\s]+ Ave)/i);
@@ -920,58 +902,40 @@ function buildAddressVariants(address) {
   return [...new Set(variants.filter(Boolean))];
 }
 
-
-
 const backfillCoordinatesGoogle = async (req, res) => {
   if (req.query.secret !== "cns-backfill-2024") {
     return res.status(403).json({ message: "Forbidden — wrong secret" });
   }
-
   if (!GOOGLE_AHMED_KEY_FOR_GEOCODING) {
-    return res.status(500).json({ message: "GOOGLE_AHMED_KEY_FOR_GEOCODING not set on server" });
+    return res.status(500).json({ message: "GOOGLE_AHMED_KEY_FOR_GEOCODING not set" });
   }
 
-  // Log the key prefix so we can verify which key is being used (never log full key)
-  console.log(`[Google Backfill] Using API key starting with: ${GOOGLE_AHMED_KEY_FOR_GEOCODING.slice(0, 8)}...`);
-  console.log(`[Google Backfill] Key length: ${GOOGLE_AHMED_KEY_FOR_GEOCODING.length}`);
+  console.log(`[Backfill] Key prefix: ${GOOGLE_AHMED_KEY_FOR_GEOCODING.slice(0, 8)}...`);
 
-  // Test the key with a single known address before running the full backfill
-  console.log(`[Google Backfill] Running key test...`);
   try {
     const testUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=Sydney+Australia&key=${GOOGLE_AHMED_KEY_FOR_GEOCODING}`;
-    const testRes = await fetch(testUrl);
+    const testRes  = await fetch(testUrl);
     const testData = await testRes.json();
-    console.log(`[Google Backfill] Key test status: ${testData.status}`);
-    console.log(`[Google Backfill] Key test error_message: ${testData.error_message || "none"}`);
-
     if (testData.status !== "OK") {
       return res.status(500).json({
-        message: "API key test failed — aborting backfill",
+        message: "API key test failed",
         status: testData.status,
         error_message: testData.error_message || null,
-        key_prefix: GOOGLE_AHMED_KEY_FOR_GEOCODING.slice(0, 8),
       });
     }
-    console.log(`[Google Backfill] Key test passed ✓`);
   } catch (err) {
-    return res.status(500).json({
-      message: "Key test fetch failed",
-      error: err.message,
-    });
+    return res.status(500).json({ message: "Key test fetch failed", error: err.message });
   }
 
-  const forceAll = req.query.force === "true";
+  const forceAll      = req.query.force === "true";
   const allBusinesses = await Business.find({}).select("_id name address coordinates");
-  const businesses = forceAll
+  const businesses    = forceAll
     ? allBusinesses
     : allBusinesses.filter((b) => !b.coordinates?.lat || !b.coordinates?.lng);
-
-  console.log(`[Google Backfill] Total in DB: ${allBusinesses.length} | To geocode: ${businesses.length}`);
 
   const results = {
     totalInDB: allBusinesses.length,
     toGeocode: businesses.length,
-    keyPrefix: GOOGLE_AHMED_KEY_FOR_GEOCODING.slice(0, 8),
     success: 0,
     failed: 0,
     details: [],
@@ -981,22 +945,12 @@ const backfillCoordinatesGoogle = async (req, res) => {
     const b = businesses[i];
     try {
       const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(b.address)}&key=${GOOGLE_AHMED_KEY_FOR_GEOCODING}`;
-      console.log(`[Google Backfill] ${i + 1}/${businesses.length} — fetching: "${b.address}"`);
-
-      const geoRes = await fetch(url);
-      const rawText = await geoRes.text(); // read as text first so we can log it on error
+      const geoRes  = await fetch(url);
+      const rawText = await geoRes.text();
 
       let geoData;
-      try {
-        geoData = JSON.parse(rawText);
-      } catch (parseErr) {
-        console.error(`[Google Backfill] ✗ JSON parse failed for "${b.name}": ${rawText.slice(0, 200)}`);
-        results.failed++;
-        results.details.push({ name: b.name, status: "parse_error", raw: rawText.slice(0, 200) });
-        continue;
-      }
-
-      console.log(`[Google Backfill] Response status: ${geoData.status} | error_message: ${geoData.error_message || "none"}`);
+      try { geoData = JSON.parse(rawText); }
+      catch { results.failed++; results.details.push({ name: b.name, status: "parse_error" }); continue; }
 
       if (geoData.status === "OK" && geoData.results?.[0]) {
         const loc = geoData.results[0].geometry.location;
@@ -1006,243 +960,29 @@ const backfillCoordinatesGoogle = async (req, res) => {
         });
         results.success++;
         results.details.push({ name: b.name, status: "ok", lat: loc.lat, lng: loc.lng });
-        console.log(`[Google Backfill] ✓ ${b.name} → ${loc.lat}, ${loc.lng}`);
       } else {
         results.failed++;
-        results.details.push({
-          name: b.name,
-          address: b.address,
-          status: "failed",
-          reason: geoData.status,
-          error_message: geoData.error_message || null,
-        });
-        console.log(`[Google Backfill] ✗ ${b.name} — status: ${geoData.status}, error: ${geoData.error_message || "none"}`);
+        results.details.push({ name: b.name, address: b.address, status: "failed", reason: geoData.status });
       }
     } catch (err) {
       results.failed++;
       results.details.push({ name: b.name, status: "error", error: err.message });
-      console.error(`[Google Backfill] ✗ ${b.name} — exception: ${err.message}`);
     }
-
-    if (i < businesses.length - 1) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    if (i < businesses.length - 1) await new Promise((r) => setTimeout(r, 100));
   }
 
-  console.log(`[Google Backfill] Done — success:${results.success} failed:${results.failed}`);
   return res.status(200).json(results);
 };
 
-
-const getSearchHistory = asyncHandler(async (req, res) => {
-  // req.user._id is set by your auth middleware
-  const user = await User.findById(req.user._id)
-    .select("searchHistory")
-    .lean();
-
-  if (!user) {
-    res.status(404);
-    throw new Error("User not found");
-  }
-
-  // Return newest-first, capped at MAX_HISTORY
-  const history = (user.searchHistory ?? [])
-    .sort((a, b) => new Date(b.searchedAt) - new Date(a.searchedAt))
-    .slice(0, MAX_HISTORY)
-    .map((h) => h.query);
-
-  res.status(200).json({ history });
-});
-
-/**
- * @desc  Push a query to the current user's search history
- * @route POST /api/users/search-history
- * @access Private
- * Body: { query: string }
- */
-const addSearchHistory = asyncHandler(async (req, res) => {
-  const { query } = req.body;
-
-  if (!query || typeof query !== "string" || !query.trim()) {
-    res.status(400);
-    throw new Error("query is required");
-  }
-
-  const trimmed = query.trim();
-
-  // Pull any existing entry for this exact query (case-insensitive dedup),
-  // then push the fresh one, then trim the array to MAX_HISTORY newest entries.
-  await User.findByIdAndUpdate(req.user._id, {
-    // Remove any previous entry with the same query text
-    $pull: { searchHistory: { query: { $regex: `^${trimmed}$`, $options: "i" } } },
-  });
-
-  await User.findByIdAndUpdate(req.user._id, {
-    $push: {
-      searchHistory: {
-        $each:     [{ query: trimmed, searchedAt: new Date() }],
-        $sort:     { searchedAt: -1 },
-        $slice:    MAX_HISTORY,
-      },
-    },
-  });
-
-  res.status(200).json({ message: "Search history updated" });
-});
-
-
-
-
-const getNearbyBusinesses = asyncHandler(async (req, res) => {
-  const { lat, lng, limit } = req.query;
-
-  if (!lat || !lng) {
-    return res.status(400).json({ message: "lat and lng are required" });
-  }
-
-  const parsedLat = parseFloat(lat);
-  const parsedLng = parseFloat(lng);
-  const parsedLimit = Math.min(parseInt(limit, 10) || 8, 20);
-
-  if (isNaN(parsedLat) || isNaN(parsedLng)) {
-    return res.status(400).json({ message: "lat and lng must be valid numbers" });
-  }
-
-  if (!GOOGLE_API_KEY) {
-    return res.status(500).json({ message: "Server configuration error: Missing API Key" });
-  }
-
-  // ── Cache key: coordinates rounded to ~110m precision + limit ─────────────
-  // Repeated "Near You" loads from roughly the same spot reuse the cached
-  // result instead of re-hitting Google Nearby.
-  const cacheKey = `${roundCoord(parsedLat * 10) / 10},${roundCoord(parsedLng * 10) / 10}|${parsedLimit}`;
-  const cached = cacheGet("nearbyBusinesses", cacheKey);
-  if (cached !== undefined) {
-    console.log("✅ Nearby businesses cache hit for:", cacheKey);
-    return res.status(200).json(cached);
-  }
-
-  try {
-    const results = await dedupeInFlight("nearbyBusinesses", cacheKey, async () => {
-      const response = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": GOOGLE_API_KEY,
-          "X-Goog-FieldMask":
-            "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.businessStatus",
-        },
-        body: JSON.stringify({
-          locationRestriction: {
-            circle: {
-              center: { latitude: parsedLat, longitude: parsedLng },
-              radius: 1000.0, // 1 km — tight radius, these are "right near you" results
-            },
-          },
-          // Only return places that are actually open businesses, not parks/roads etc.
-          includedTypes: [
-            "store",
-            "restaurant",
-            "shopping_mall",
-            "supermarket",
-            "pharmacy",
-            "bank",
-            "hospital",
-            "gym",
-            "cafe",
-            "clothing_store",
-            "convenience_store",
-            "department_store",
-            "electronics_store",
-            "furniture_store",
-            "home_goods_store",
-            "jewelry_store",
-            "shoe_store",
-            "bakery",
-            "fast_food_restaurant",
-          ],
-          maxResultCount: parsedLimit,
-          languageCode: "en",
-        }),
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        console.error(`❌ Google Nearby error ${response.status}:`, errText);
-        const err = new Error("Nearby search failed");
-        err.statusCode = 502;
-        throw err;
-      }
-
-      const data = await response.json();
-      const places = data.places || [];
-      console.log(`✅ Google Nearby returned ${places.length} results for (${parsedLat}, ${parsedLng})`);
-
-      // Map to the same contract the frontend expects for NearbyBusiness,
-      // which extends Business and adds _distanceKm
-      const mapped = places.map((place) => {
-        const placeLat = place.location?.latitude ?? parsedLat;
-        const placeLng = place.location?.longitude ?? parsedLng;
-
-        // Haversine distance
-        const dLat = (placeLat - parsedLat) * (Math.PI / 180);
-        const dLng = (placeLng - parsedLng) * (Math.PI / 180);
-        const a =
-          Math.sin(dLat / 2) ** 2 +
-          Math.cos(parsedLat * (Math.PI / 180)) *
-            Math.cos(placeLat * (Math.PI / 180)) *
-            Math.sin(dLng / 2) ** 2;
-        const distanceKm =
-          Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
-
-        return {
-          placeId: place.id,
-          name: place.displayName?.text || "Unknown",
-          address: place.formattedAddress || "Address not available",
-          source: "google",
-          type: "Standalone",
-          totalContributions: 0,
-          isVerified: false,
-          lat: placeLat,
-          lng: placeLng,
-          _distanceKm: distanceKm,
-          _fromFoursquare: true, // marks it as global so the frontend handles it correctly
-        };
-      });
-
-      // Sort by distance — Google Nearby doesn't guarantee distance order
-      mapped.sort((a, b) => a._distanceKm - b._distanceKm);
-
-      cacheSet("nearbyBusinesses", cacheKey, mapped, NEARBY_TTL_MS);
-
-      return mapped;
-    });
-
-    return res.status(200).json(results);
-  } catch (error) {
-    if (error.statusCode === 502) {
-      return res.status(502).json({ message: "Nearby search failed" });
-    }
-    console.error("❌ Google Nearby fetch error:", error);
-    return res.status(502).json({ message: "Nearby search service error" });
-  }
-});
-
-
-
-
-
-
+// ══════════════════════════════════════════════════════════════════════════════
+// PROXY DIRECTIONS
+// ══════════════════════════════════════════════════════════════════════════════
 const proxyDirections = asyncHandler(async (req, res) => {
   const { originLat, originLng, destLat, destLng } = req.body;
-
-  console.log("[proxyDirections] body received:", req.body);  // ADD
 
   if (!originLat || !originLng || !destLat || !destLng) {
     return res.status(400).json({ error: "originLat, originLng, destLat, destLng are required" });
   }
-
-  console.log("[proxyDirections] ROUTING_API key set?", !!ROUTING_API);  // ADD
 
   const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
     method: "POST",
@@ -1263,28 +1003,17 @@ const proxyDirections = asyncHandler(async (req, res) => {
       ].join(","),
     },
     body: JSON.stringify({
-      origin: {
-        location: { latLng: { latitude: Number(originLat), longitude: Number(originLng) } },
-      },
-      destination: {
-        location: { latLng: { latitude: Number(destLat), longitude: Number(destLng) } },
-      },
-      travelMode: "DRIVE",
-      routingPreference: "TRAFFIC_AWARE",
+      origin:      { location: { latLng: { latitude: Number(originLat), longitude: Number(originLng) } } },
+      destination: { location: { latLng: { latitude: Number(destLat),   longitude: Number(destLng)   } } },
+      travelMode:              "DRIVE",
+      routingPreference:       "TRAFFIC_AWARE",
       computeAlternativeRoutes: false,
       languageCode: "en-US",
       units: "METRIC",
     }),
   });
 
- 
-
   const data = await response.json();
-
-   console.log("[proxyDirections] full response body:", JSON.stringify(data, null, 2));
-
-  console.log("[proxyDirections] Google status:", response.status);       // ADD
-  console.log("[proxyDirections] Google response:", JSON.stringify(data)); // ADD
 
   if (!response.ok) {
     console.error("[proxyDirections] Routes API error:", data);
@@ -1295,17 +1024,7 @@ const proxyDirections = asyncHandler(async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Exported invalidation helper for OTHER controllers (instruction.controller.js)
-// ──────────────────────────────────────────────────────────────────────────────
-// Call this from createInstruction / updateInstruction / likeInstruction /
-// dislikeInstruction after a successful write, passing the business ID the
-// instruction belongs to. That way a new instruction, edit, or vote shows up
-// immediately on the next getBusinessDetails call instead of waiting up to
-// BUSINESS_DETAIL_TTL_MS for the cache to expire.
-//
-// Usage in instruction.controller.js:
-//   const { invalidateBusinessDetailCache } = require('./business.controller');
-//   invalidateBusinessDetailCache(businessId);
+// CACHE INVALIDATION HELPER (used by instruction.controller.js)
 // ══════════════════════════════════════════════════════════════════════════════
 function invalidateBusinessDetailCache(businessId) {
   if (!businessId) return;
@@ -1321,7 +1040,8 @@ module.exports = {
   createFromGlobal,
   updateEntryPin,
   backfillCoordinatesGoogle,
-  getSearchHistory, addSearchHistory,
+  getSearchHistory,
+  addSearchHistory,
   proxyDirections,
   getNearbyBusinesses,
   invalidateBusinessDetailCache,
