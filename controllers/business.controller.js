@@ -105,13 +105,13 @@ const BUSINESS_LIST_TTL_MS    = 30 * 1000;      // 30 seconds
 // ══════════════════════════════════════════════════════════════════════════════
 // PLACES SEARCH (Google Text Search)
 // ──────────────────────────────────────────────────────────────────────────────
-// CHANGES:
-//   • Removed the 100km hard filter — ALL results are returned regardless of
-//     distance. Distance is attached as metadata (_distanceKm) and used by the
-//     frontend scoring engine to rank results, not to exclude them.
-//   • locationBias is still forwarded so Google ranks nearby results higher,
-//     but we no longer throw away anything based on distance.
-//   • Cache key unchanged — still stable per (query, coarse-location).
+// CHANGES (this revision):
+//   • Added pageSize: 20 explicitly. Google's Places Text Search API can
+//     silently return fewer results than you'd expect (sometimes just 1-3)
+//     if pageSize isn't specified — this is why "cheezious lahore" was only
+//     returning a single branch instead of all the Lahore branches.
+//   • Kept the no-hard-distance-filter behaviour: ALL results are returned,
+//     distance is metadata only, ranking happens client-side.
 // ══════════════════════════════════════════════════════════════════════════════
 const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   const { q, lat, lng } = req.query;
@@ -162,6 +162,10 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
       const requestBody = {
         textQuery: query,
         languageCode: "en",
+        // [FIX] explicit pageSize — without this Google sometimes returns
+        // only a handful of results (occasionally just 1) for queries that
+        // match many branches of the same chain (e.g. "cheezious lahore").
+        pageSize: 20,
       };
 
       // Soft bias — improves ranking without restricting results
@@ -350,14 +354,26 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 // GET ALL BUSINESSES
 // ──────────────────────────────────────────────────────────────────────────────
-// CHANGES:
-//   • Now returns coordinates on every record so the frontend can compute
-//     distance and incorporate it into the unified relevance ranking.
-//   • Still caches the full sorted list and slices pages from it for
-//     pagination consistency.
+// CHANGES (this revision):
+//   • [FIX] Multi-word AND search. The previous version regex-matched the
+//     ENTIRE search string as one literal substring, so "cheezious lahore"
+//     was looking for the literal text "cheezious lahore" inside name/
+//     address/tags — which almost never appears contiguously, so it
+//     effectively matched nothing (and the frontend was papering over this
+//     by silently re-querying with just "cheezious", losing the city filter
+//     entirely — see SearchScreen.tsx fix).
+//
+//     Now the query is split into individual terms and EVERY term must be
+//     found somewhere in name/address/tags (each term can match a different
+//     field) — e.g. "cheezious" in name AND "lahore" in address. This is
+//     the same approach Google/most search engines use for multi-word
+//     queries.
+//   • Still returns coordinates on every record for client-side distance
+//     ranking, and still caches the full sorted list per search key.
 // ══════════════════════════════════════════════════════════════════════════════
 const getBusinesses = asyncHandler(async (req, res) => {
-  const searchTerm = req.query.search ? normaliseQueryKey(req.query.search) : "";
+  const rawSearch = req.query.search ? req.query.search.trim() : "";
+  const searchTerm = normaliseQueryKey(rawSearch);
   const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0;
   const skip  = req.query.skip  ? parseInt(req.query.skip,  10) : 0;
 
@@ -367,15 +383,23 @@ const getBusinesses = asyncHandler(async (req, res) => {
 
   if (full === undefined) {
     full = await dedupeInFlight("businessFullList", cacheKey, async () => {
-      const keyword = req.query.search
-        ? {
-            $or: [
-              { name:    { $regex: req.query.search, $options: "i" } },
-              { address: { $regex: req.query.search, $options: "i" } },
-              { tags:    { $regex: req.query.search, $options: "i" } },
-            ],
-          }
-        : {};
+      // [FIX] split into terms, AND them together across name/address/tags
+      const searchTokens = rawSearch
+        ? rawSearch.split(/\s+/).filter((t) => t.length > 0)
+        : [];
+
+      const keyword =
+        searchTokens.length > 0
+          ? {
+              $and: searchTokens.map((tok) => ({
+                $or: [
+                  { name: { $regex: escapeRegex(tok), $options: "i" } },
+                  { address: { $regex: escapeRegex(tok), $options: "i" } },
+                  { tags: { $regex: escapeRegex(tok), $options: "i" } },
+                ],
+              })),
+            }
+          : {};
 
       // Select coordinates explicitly so the frontend can rank by distance
       const all = await Business.find(keyword)
@@ -395,6 +419,12 @@ const getBusinesses = asyncHandler(async (req, res) => {
 
   res.status(200).json({ businesses, total });
 });
+
+// Escapes regex special characters so a user typing "f-9" or "(abc)" doesn't
+// throw or behave unexpectedly when used inside a $regex.
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // GET BUSINESS DETAILS
@@ -850,7 +880,7 @@ const addSearchHistory = asyncHandler(async (req, res) => {
   const trimmed = query.trim();
 
   await User.findByIdAndUpdate(req.user._id, {
-    $pull: { searchHistory: { query: { $regex: `^${trimmed}$`, $options: "i" } } },
+    $pull: { searchHistory: { query: { $regex: `^${escapeRegex(trimmed)}$`, $options: "i" } } },
   });
 
   await User.findByIdAndUpdate(req.user._id, {
