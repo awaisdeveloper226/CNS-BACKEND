@@ -365,6 +365,12 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 //     literal "Lahore" in its address) is no longer dropped outright — it's
 //     ranked lower instead. This fixes "cheezious lahore" only returning a
 //     single branch.
+//
+//   • REQUIRES the migration in the deployment notes to be run once:
+//       db.businesses.createIndex(
+//         { name: "text", address: "text", tags: "text" },
+//         { weights: { name: 10, tags: 5, address: 3 }, name: "BusinessTextIndex" }
+//       );
 // ══════════════════════════════════════════════════════════════════════════════
 const ALPHANUM_CODE_RE = /\b[a-z]\d+\b|\b\d+[a-z]\b/i;
 const MIN_TEXT_SEARCH_LEN = 3; // below this, $text's word-stemming is unreliable
