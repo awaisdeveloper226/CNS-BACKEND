@@ -102,16 +102,14 @@ const REVERSE_GEOCODE_TTL_MS  = 24 * 60 * 60 * 1000; // 24 hours
 const BUSINESS_DETAIL_TTL_MS  = 45 * 1000;      // 45 seconds
 const BUSINESS_LIST_TTL_MS    = 30 * 1000;      // 30 seconds
 
+// Escapes regex special characters so a user typing "f-9" or "(abc)" doesn't
+// throw or behave unexpectedly when used inside a $regex.
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // PLACES SEARCH (Google Text Search)
-// ──────────────────────────────────────────────────────────────────────────────
-// CHANGES (this revision):
-//   • Added pageSize: 20 explicitly. Google's Places Text Search API can
-//     silently return fewer results than you'd expect (sometimes just 1-3)
-//     if pageSize isn't specified — this is why "cheezious lahore" was only
-//     returning a single branch instead of all the Lahore branches.
-//   • Kept the no-hard-distance-filter behaviour: ALL results are returned,
-//     distance is metadata only, ranking happens client-side.
 // ══════════════════════════════════════════════════════════════════════════════
 const searchFoursquarePlaces = asyncHandler(async (req, res) => {
   const { q, lat, lng } = req.query;
@@ -162,13 +160,9 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
       const requestBody = {
         textQuery: query,
         languageCode: "en",
-        // [FIX] explicit pageSize — without this Google sometimes returns
-        // only a handful of results (occasionally just 1) for queries that
-        // match many branches of the same chain (e.g. "cheezious lahore").
         pageSize: 20,
       };
 
-      // Soft bias — improves ranking without restricting results
       if (parsedLat !== null && parsedLng !== null) {
         requestBody.locationBias = {
           circle: {
@@ -202,9 +196,6 @@ const searchFoursquarePlaces = asyncHandler(async (req, res) => {
       const places = data.places || [];
       console.log(`✅ Google Places: ${places.length} results (no hard filter)`);
 
-      // Attach _distanceKm as metadata for client-side ranking.
-      // No filtering — even results 500km away are returned; the scoring
-      // engine on the frontend penalises distance rather than discarding.
       const mapped = places.map((place) => {
         const rLat = place.location?.latitude ?? null;
         const rLng = place.location?.longitude ?? null;
@@ -352,25 +343,32 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// GET ALL BUSINESSES
+// GET ALL BUSINESSES  —  TEXT-INDEX SEARCH (fast path) + regex fallback
 // ──────────────────────────────────────────────────────────────────────────────
 // CHANGES (this revision):
-//   • [FIX] Multi-word AND search. The previous version regex-matched the
-//     ENTIRE search string as one literal substring, so "cheezious lahore"
-//     was looking for the literal text "cheezious lahore" inside name/
-//     address/tags — which almost never appears contiguously, so it
-//     effectively matched nothing (and the frontend was papering over this
-//     by silently re-querying with just "cheezious", losing the city filter
-//     entirely — see SearchScreen.tsx fix).
+//   • PRIMARY PATH: uses MongoDB's $text operator against the
+//     `BusinessTextIndex` (name/address/tags, weighted). $text is indexed —
+//     it does NOT scan every document — so this is the fix for the 3-5s
+//     delay. It also gives us a real relevance score (textScore) for free,
+//     and naturally handles multi-word queries as "match as many terms as
+//     possible, rank by how well they matched" rather than all-or-nothing.
 //
-//     Now the query is split into individual terms and EVERY term must be
-//     found somewhere in name/address/tags (each term can match a different
-//     field) — e.g. "cheezious" in name AND "lahore" in address. This is
-//     the same approach Google/most search engines use for multi-word
-//     queries.
-//   • Still returns coordinates on every record for client-side distance
-//     ranking, and still caches the full sorted list per search key.
+//   • FALLBACK PATH: $text only matches whole stemmed words, so short
+//     in-progress queries (e.g. user has typed "che" for "cheezious") or
+//     alphanumeric sector codes (e.g. "f9") won't match via $text yet.
+//     For those cases — short queries, or queries containing alphanumeric
+//     codes — we fall back to the previous regex-OR scan, which handles
+//     partial/substring matching. This keeps autocomplete-as-you-type
+//     working while using the fast indexed path whenever possible.
+//
+//   • NO MORE STRICT AND: a business missing one query word (e.g. has no
+//     literal "Lahore" in its address) is no longer dropped outright — it's
+//     ranked lower instead. This fixes "cheezious lahore" only returning a
+//     single branch.
 // ══════════════════════════════════════════════════════════════════════════════
+const ALPHANUM_CODE_RE = /\b[a-z]\d+\b|\b\d+[a-z]\b/i;
+const MIN_TEXT_SEARCH_LEN = 3; // below this, $text's word-stemming is unreliable
+
 const getBusinesses = asyncHandler(async (req, res) => {
   const rawSearch = req.query.search ? req.query.search.trim() : "";
   const searchTerm = normaliseQueryKey(rawSearch);
@@ -383,29 +381,91 @@ const getBusinesses = asyncHandler(async (req, res) => {
 
   if (full === undefined) {
     full = await dedupeInFlight("businessFullList", cacheKey, async () => {
-      // [FIX] split into terms, AND them together across name/address/tags
-      const searchTokens = rawSearch
-        ? rawSearch.split(/\s+/).filter((t) => t.length > 0)
-        : [];
+      const SELECT_FIELDS =
+        "name address type totalContributions isVerified coordinates placeId tags entryPin";
 
-      const keyword =
-        searchTokens.length > 0
-          ? {
-              $and: searchTokens.map((tok) => ({
-                $or: [
-                  { name: { $regex: escapeRegex(tok), $options: "i" } },
-                  { address: { $regex: escapeRegex(tok), $options: "i" } },
-                  { tags: { $regex: escapeRegex(tok), $options: "i" } },
-                ],
-              })),
-            }
-          : {};
+      // ── No query: just return everything, sorted by contribution count ──
+      if (!rawSearch) {
+        const all = await Business.find({})
+          .select(SELECT_FIELDS)
+          .sort({ totalContributions: -1, _id: 1 })
+          .lean();
+        cacheSet("businessFullList", cacheKey, all, BUSINESS_LIST_TTL_MS);
+        return all;
+      }
 
-      // Select coordinates explicitly so the frontend can rank by distance
+      const searchTokens = rawSearch.split(/\s+/).filter((t) => t.length > 0);
+      const needsRegexFallback =
+        rawSearch.length < MIN_TEXT_SEARCH_LEN || ALPHANUM_CODE_RE.test(rawSearch);
+
+      let textResults = [];
+      let usedText = false;
+
+      // ── FAST PATH: indexed $text search ──────────────────────────────
+      if (!needsRegexFallback) {
+        try {
+          textResults = await Business.find(
+            { $text: { $search: rawSearch } },
+            { score: { $meta: "textScore" } }
+          )
+            .select(SELECT_FIELDS + " score")
+            .sort({ score: { $meta: "textScore" } })
+            .limit(200)
+            .lean();
+          usedText = true;
+        } catch (err) {
+          // If the text index hasn't been created yet (e.g. fresh DB before
+          // migration runs), don't hard-fail search — just fall through to
+          // the regex path below.
+          console.error("⚠️ $text search failed, falling back to regex:", err.message);
+          usedText = false;
+        }
+      }
+
+      // If $text found a healthy number of results, use it directly —
+      // it's already relevance-sorted via textScore.
+      if (usedText && textResults.length > 0) {
+        const all = textResults.map((b) => {
+          const { score, ...rest } = b;
+          return { ...rest, _matchScore: score };
+        });
+        cacheSet("businessFullList", cacheKey, all, BUSINESS_LIST_TTL_MS);
+        return all;
+      }
+
+      // ── FALLBACK PATH: regex OR-scan ─────────────────────────────────
+      // Used for short/in-progress queries, alphanumeric codes, or when
+      // $text returns nothing (e.g. it found no stemmed-word matches but
+      // a substring match still exists, like "cheez" mid-typing).
+      const keyword = {
+        $or: searchTokens.map((tok) => ({
+          $or: [
+            { name: { $regex: escapeRegex(tok), $options: "i" } },
+            { address: { $regex: escapeRegex(tok), $options: "i" } },
+            { tags: { $regex: escapeRegex(tok), $options: "i" } },
+          ],
+        })),
+      };
+
       const all = await Business.find(keyword)
-        .select("name address type totalContributions isVerified coordinates placeId tags entryPin")
-        .sort({ totalContributions: -1, _id: 1 })
+        .select(SELECT_FIELDS)
+        .limit(200)
         .lean();
+
+      // Score by how many of the query tokens actually matched — a
+      // business missing just one word (e.g. no literal city name) still
+      // shows up, ranked lower, instead of vanishing entirely.
+      const lower = (s) => (s || "").toLowerCase();
+      for (const b of all) {
+        const haystack = `${lower(b.name)} ${lower(b.address)} ${(b.tags || []).join(" ").toLowerCase()}`;
+        const matchedCount = searchTokens.filter((t) => haystack.includes(t.toLowerCase())).length;
+        b._matchScore = matchedCount / searchTokens.length;
+      }
+      all.sort(
+        (a, b) =>
+          b._matchScore - a._matchScore ||
+          b.totalContributions - a.totalContributions
+      );
 
       cacheSet("businessFullList", cacheKey, all, BUSINESS_LIST_TTL_MS);
       return all;
@@ -419,12 +479,6 @@ const getBusinesses = asyncHandler(async (req, res) => {
 
   res.status(200).json({ businesses, total });
 });
-
-// Escapes regex special characters so a user typing "f-9" or "(abc)" doesn't
-// throw or behave unexpectedly when used inside a $regex.
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // GET BUSINESS DETAILS
