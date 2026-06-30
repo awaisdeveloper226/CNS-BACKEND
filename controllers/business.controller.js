@@ -100,10 +100,9 @@ const PLACES_SEARCH_TTL_MS    = 15 * 60 * 1000; // 15 minutes
 const NEARBY_TTL_MS           = 10 * 60 * 1000; // 10 minutes
 const REVERSE_GEOCODE_TTL_MS  = 24 * 60 * 60 * 1000; // 24 hours
 const BUSINESS_DETAIL_TTL_MS  = 45 * 1000;      // 45 seconds
-const BUSINESS_LIST_TTL_MS    = 30 * 1000;      // 30 seconds
+const BUSINESS_INDEX_TTL_MS   = 60 * 1000;      // 60 seconds — in-memory search index refresh
 
-// Escapes regex special characters so a user typing "f-9" or "(abc)" doesn't
-// throw or behave unexpectedly when used inside a $regex.
+// Escapes regex special characters (still used by addSearchHistory's exact-match pull).
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -343,141 +342,232 @@ const reverseGeocode = asyncHandler(async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// GET ALL BUSINESSES  —  TEXT-INDEX SEARCH (fast path) + regex fallback
+// IN-MEMORY SEARCH ENGINE
 // ──────────────────────────────────────────────────────────────────────────────
-// CHANGES (this revision):
-//   • PRIMARY PATH: uses MongoDB's $text operator against the
-//     `BusinessTextIndex` (name/address/tags, weighted). $text is indexed —
-//     it does NOT scan every document — so this is the fix for the 3-5s
-//     delay. It also gives us a real relevance score (textScore) for free,
-//     and naturally handles multi-word queries as "match as many terms as
-//     possible, rank by how well they matched" rather than all-or-nothing.
+// Rationale: this collection is small (hundreds of documents, not millions).
+// At this scale a full in-memory inverted-index style scorer is *faster*
+// than any Mongo query (no network round trip to the query planner, no
+// regex scan, no index maintenance, no Atlas UI index wrangling) — and it
+// gives us complete control over fuzzy matching, multi-word ranking, and
+// scoring without fighting Mongo's text-search semantics.
 //
-//   • FALLBACK PATH: $text only matches whole stemmed words, so short
-//     in-progress queries (e.g. user has typed "che" for "cheezious") or
-//     alphanumeric sector codes (e.g. "f9") won't match via $text yet.
-//     For those cases — short queries, or queries containing alphanumeric
-//     codes — we fall back to the previous regex-OR scan, which handles
-//     partial/substring matching. This keeps autocomplete-as-you-type
-//     working while using the fast indexed path whenever possible.
-//
-//   • NO MORE STRICT AND: a business missing one query word (e.g. has no
-//     literal "Lahore" in its address) is no longer dropped outright — it's
-//     ranked lower instead. This fixes "cheezious lahore" only returning a
-//     single branch.
-//
-//   • REQUIRES the migration in the deployment notes to be run once:
-//       db.businesses.createIndex(
-//         { name: "text", address: "text", tags: "text" },
-//         { weights: { name: 10, tags: 5, address: 3 }, name: "BusinessTextIndex" }
-//       );
+// All businesses are loaded + tokenized ONCE per BUSINESS_INDEX_TTL_MS
+// (60s) and cached. Every search after that is pure in-memory JS — sub-
+// millisecond for this dataset size. Writes (create/update) invalidate the
+// cache immediately so changes show up right away.
 // ══════════════════════════════════════════════════════════════════════════════
-const ALPHANUM_CODE_RE = /\b[a-z]\d+\b|\b\d+[a-z]\b/i;
-const MIN_TEXT_SEARCH_LEN = 3; // below this, $text's word-stemming is unreliable
 
+const STOP_WORDS = new Set([
+  "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for", "is",
+  "are", "was", "were", "be", "been", "by", "with", "as", "that", "this",
+  "it", "its", "inc", "llc", "ltd", "co", "corp", "group", "&", "near", "me",
+]);
+
+// Joins adjacent letter+digit token pairs into sector/block codes:
+// ["f","9"] -> ["f9"], so "F-9 Markaz" tokenises to ["f9","markaz"].
+function mergeCodeTokens(tokens) {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const cur = tokens[i];
+    const nxt = tokens[i + 1];
+    if (nxt && /^[a-z]$/.test(cur) && /^\d+$/.test(nxt)) {
+      out.push(cur + nxt);
+      i++;
+    } else {
+      out.push(cur);
+    }
+  }
+  return out;
+}
+
+function tokenise(s) {
+  if (!s) return [];
+  return mergeCodeTokens(
+    String(s)
+      .toLowerCase()
+      .split(/[\s,\-\/\.\(\)&'"]+/)
+      .filter((w) => w.length > 0)
+  );
+}
+
+function tokenWeight(t) {
+  if (STOP_WORDS.has(t)) return 0.15;
+  if (/^[a-z]\d+$/.test(t) || /^\d+[a-z]$/.test(t)) return 1.3; // sector codes (f9, g8…) are highly specific
+  if (t.length <= 2) return 0.4;
+  if (t.length <= 4) return 0.75;
+  return 1.0;
+}
+
+// Small, fast Levenshtein — only ever called on short tokens (a few chars),
+// so the O(n*m) cost is negligible even run thousands of times per search.
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Array(n + 1);
+  let cur = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[n];
+}
+
+// How close two tokens are, 0..1. Combines exact/prefix/substring checks
+// (cheap, catch most real queries) with edit-distance fuzzy matching
+// (catches typos) only as a fallback.
+function tokenSimilarity(qt, ft) {
+  if (qt === ft) return 1.0;
+  if (ft.startsWith(qt)) return 0.92 * (qt.length / ft.length) + 0.08;
+  if (qt.startsWith(ft) && ft.length > 1) return 0.85 * (ft.length / qt.length) + 0.08;
+  if (ft.includes(qt) && qt.length > 1) return 0.72;
+  if (qt.includes(ft) && ft.length > 2) return 0.65;
+
+  // Fuzzy fallback — allowance grows slightly with token length so
+  // "cheezious" tolerates a typo but "ab" doesn't fuzzy-match everything.
+  const maxLen = Math.max(qt.length, ft.length);
+  if (maxLen < 3) return 0;
+  const allowed = qt.length <= 4 ? 1 : qt.length <= 7 ? 2 : 3;
+  const dist = levenshtein(qt, ft);
+  if (dist > allowed) return 0;
+  return Math.max(0, 0.55 * (1 - dist / maxLen));
+}
+
+const SEARCH_FIELD_WEIGHTS = { name: 6.0, tags: 3.0, address: 2.0 };
+
+// Tokenize once per business, reused across every search until the index
+// cache expires or is invalidated.
+function buildSearchEntry(b) {
+  const tagsText = Array.isArray(b.tags) ? b.tags.join(" ") : "";
+  return {
+    raw: b,
+    fieldTokens: {
+      name: tokenise(b.name),
+      address: tokenise(b.address),
+      tags: tokenise(tagsText),
+    },
+    nameLower: (b.name || "").toLowerCase(),
+  };
+}
+
+async function getSearchIndex() {
+  const cached = cacheGet("businessIndex", "all");
+  if (cached !== undefined) return cached;
+
+  return dedupeInFlight("businessIndex", "all", async () => {
+    const docs = await Business.find({})
+      .select("name address type totalContributions isVerified coordinates placeId tags entryPin")
+      .sort({ totalContributions: -1, _id: 1 })
+      .lean();
+
+    const entries = docs.map(buildSearchEntry);
+    cacheSet("businessIndex", "all", entries, BUSINESS_INDEX_TTL_MS);
+    return entries;
+  });
+}
+
+function invalidateSearchIndex() {
+  cacheDelete("businessIndex", "all");
+}
+
+// Scores one business entry against the query tokens. Returns null if it's
+// not a match at all (zero tokens matched anywhere). Otherwise returns a
+// score that rewards full coverage of the query but never zeroes out a
+// business just for missing one word — a partial match (e.g. matched
+// "cheezious" but not "lahore") still scores, just lower than a full match.
+// This is what fixes "only one branch comes back" for multi-word queries.
+function scoreEntry(entry, queryTokens) {
+  let weightedScore = 0;
+  const matchedTokens = new Set();
+
+  for (const [field, weight] of Object.entries(SEARCH_FIELD_WEIGHTS)) {
+    const fieldTokens = entry.fieldTokens[field];
+    if (fieldTokens.length === 0) continue;
+
+    let fieldScore = 0;
+    for (const qt of queryTokens) {
+      const qw = tokenWeight(qt);
+      let best = 0;
+      for (const ft of fieldTokens) {
+        const sim = tokenSimilarity(qt, ft);
+        if (sim > best) best = sim;
+      }
+      if (best > 0.3) matchedTokens.add(qt);
+      fieldScore += best * qw;
+    }
+    weightedScore += fieldScore * weight;
+  }
+
+  // Whole-query substring/prefix bonus on the name — this is what makes
+  // typing the exact business name feel instant and authoritative, like
+  // typing a full name into Google Maps.
+  const fullQuery = queryTokens.join(" ");
+  if (fullQuery.length > 1) {
+    if (entry.nameLower === fullQuery) weightedScore += 40;
+    else if (entry.nameLower.startsWith(fullQuery)) weightedScore += 25;
+    else if (entry.nameLower.includes(fullQuery)) weightedScore += 12;
+  }
+
+  if (matchedTokens.size === 0) return null;
+
+  const coverage = matchedTokens.size / queryTokens.length;
+  // Soft penalty, never a hard cutoff: full coverage = full score (×1.0),
+  // a half-matched two-word query still scores meaningfully (×~0.55) so it
+  // shows up — ranked below full matches — instead of disappearing.
+  const coverageMultiplier = 0.25 + coverage * 0.75;
+
+  return weightedScore * coverageMultiplier;
+}
+
+async function runInMemorySearch(rawSearch) {
+  const queryTokens = tokenise(rawSearch);
+  if (queryTokens.length === 0) return [];
+
+  const index = await getSearchIndex();
+  const scored = [];
+
+  for (const entry of index) {
+    const score = scoreEntry(entry, queryTokens);
+    if (score === null) continue;
+    scored.push({ business: entry.raw, score });
+  }
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return (b.business.totalContributions || 0) - (a.business.totalContributions || 0);
+  });
+
+  return scored.map((s) => ({ ...s.business, _matchScore: s.score }));
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GET ALL BUSINESSES
+// ──────────────────────────────────────────────────────────────────────────────
+// Search now runs entirely through the in-memory engine above — no Mongo
+// text index, no regex collection scan, no per-keystroke network overhead
+// beyond the one request itself. The first request after the 60s cache
+// window pays one Mongo round trip to refresh the index; every request
+// after that is pure in-process scoring.
+// ══════════════════════════════════════════════════════════════════════════════
 const getBusinesses = asyncHandler(async (req, res) => {
   const rawSearch = req.query.search ? req.query.search.trim() : "";
-  const searchTerm = normaliseQueryKey(rawSearch);
   const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0;
   const skip  = req.query.skip  ? parseInt(req.query.skip,  10) : 0;
 
-  const cacheKey = searchTerm;
+  let full;
 
-  let full = cacheGet("businessFullList", cacheKey);
-
-  if (full === undefined) {
-    full = await dedupeInFlight("businessFullList", cacheKey, async () => {
-      const SELECT_FIELDS =
-        "name address type totalContributions isVerified coordinates placeId tags entryPin";
-
-      // ── No query: just return everything, sorted by contribution count ──
-      if (!rawSearch) {
-        const all = await Business.find({})
-          .select(SELECT_FIELDS)
-          .sort({ totalContributions: -1, _id: 1 })
-          .lean();
-        cacheSet("businessFullList", cacheKey, all, BUSINESS_LIST_TTL_MS);
-        return all;
-      }
-
-      const searchTokens = rawSearch.split(/\s+/).filter((t) => t.length > 0);
-      const needsRegexFallback =
-        rawSearch.length < MIN_TEXT_SEARCH_LEN || ALPHANUM_CODE_RE.test(rawSearch);
-
-      let textResults = [];
-      let usedText = false;
-
-      // ── FAST PATH: indexed $text search ──────────────────────────────
-      if (!needsRegexFallback) {
-        try {
-          textResults = await Business.find(
-            { $text: { $search: rawSearch } },
-            { score: { $meta: "textScore" } }
-          )
-            .select(SELECT_FIELDS + " score")
-            .sort({ score: { $meta: "textScore" } })
-            .limit(200)
-            .lean();
-          usedText = true;
-        } catch (err) {
-          // If the text index hasn't been created yet (e.g. fresh DB before
-          // migration runs), don't hard-fail search — just fall through to
-          // the regex path below.
-          console.error("⚠️ $text search failed, falling back to regex:", err.message);
-          usedText = false;
-        }
-      }
-
-      // If $text found a healthy number of results, use it directly —
-      // it's already relevance-sorted via textScore.
-      if (usedText && textResults.length > 0) {
-        const all = textResults.map((b) => {
-          const { score, ...rest } = b;
-          return { ...rest, _matchScore: score };
-        });
-        cacheSet("businessFullList", cacheKey, all, BUSINESS_LIST_TTL_MS);
-        return all;
-      }
-
-      // ── FALLBACK PATH: regex OR-scan ─────────────────────────────────
-      // Used for short/in-progress queries, alphanumeric codes, or when
-      // $text returns nothing (e.g. it found no stemmed-word matches but
-      // a substring match still exists, like "cheez" mid-typing).
-      const keyword = {
-        $or: searchTokens.map((tok) => ({
-          $or: [
-            { name: { $regex: escapeRegex(tok), $options: "i" } },
-            { address: { $regex: escapeRegex(tok), $options: "i" } },
-            { tags: { $regex: escapeRegex(tok), $options: "i" } },
-          ],
-        })),
-      };
-
-      const all = await Business.find(keyword)
-        .select(SELECT_FIELDS)
-        .limit(200)
-        .lean();
-
-      // Score by how many of the query tokens actually matched — a
-      // business missing just one word (e.g. no literal city name) still
-      // shows up, ranked lower, instead of vanishing entirely.
-      const lower = (s) => (s || "").toLowerCase();
-      for (const b of all) {
-        const haystack = `${lower(b.name)} ${lower(b.address)} ${(b.tags || []).join(" ").toLowerCase()}`;
-        const matchedCount = searchTokens.filter((t) => haystack.includes(t.toLowerCase())).length;
-        b._matchScore = matchedCount / searchTokens.length;
-      }
-      all.sort(
-        (a, b) =>
-          b._matchScore - a._matchScore ||
-          b.totalContributions - a.totalContributions
-      );
-
-      cacheSet("businessFullList", cacheKey, all, BUSINESS_LIST_TTL_MS);
-      return all;
-    });
+  if (!rawSearch) {
+    // No query — just the full list, already sorted by contributions
+    // (sort happens once when the index is built).
+    const index = await getSearchIndex();
+    full = index.map((e) => e.raw);
   } else {
-    console.log("✅ Business list cache hit:", cacheKey || "(all)");
+    full = await runInMemorySearch(rawSearch);
   }
 
   const total = full.length;
@@ -634,7 +724,7 @@ const createBusiness = asyncHandler(async (req, res) => {
           lng: req.body.lng ?? null,
         },
       });
-      cacheDeleteByPrefix("businessFullList", "");
+      invalidateSearchIndex();
       return res.status(201).json(business);
     } catch (err) {
       if (err.code === 11000) {
@@ -672,7 +762,7 @@ const createBusiness = asyncHandler(async (req, res) => {
       source: "manual",
       tags: [courierType],
     });
-    cacheDeleteByPrefix("businessFullList", "");
+    invalidateSearchIndex();
     return res.status(201).json(business);
   } catch (err) {
     if (err.code === 11000) {
@@ -757,7 +847,7 @@ const createFromGlobal = asyncHandler(async (req, res) => {
     );
 
     cacheDelete("businessDetail", String(business._id));
-    cacheDeleteByPrefix("businessFullList", "");
+    invalidateSearchIndex();
 
     return res.status(wasInserted ? 201 : 200).json(business);
   } catch (err) {
@@ -768,7 +858,7 @@ const createFromGlobal = asyncHandler(async (req, res) => {
         existing.coordinates = coordsDoc;
         await existing.save();
         cacheDelete("businessDetail", String(existing._id));
-        cacheDeleteByPrefix("businessFullList", "");
+        invalidateSearchIndex();
         return res.status(200).json(existing);
       }
     }
@@ -807,6 +897,7 @@ const updateEntryPin = asyncHandler(async (req, res) => {
 
   await business.save();
   cacheDelete("businessDetail", String(business._id));
+  invalidateSearchIndex();
 
   res.status(200).json({
     message: isClearing ? "Entry pin cleared" : "Entry pin updated",
@@ -1119,6 +1210,9 @@ const proxyDirections = asyncHandler(async (req, res) => {
 function invalidateBusinessDetailCache(businessId) {
   if (!businessId) return;
   cacheDelete("businessDetail", String(businessId));
+  // An instruction (contribution) being added/edited changes totalContributions
+  // sort order and local-boost scoring, so the search index needs refreshing too.
+  invalidateSearchIndex();
 }
 
 module.exports = {
