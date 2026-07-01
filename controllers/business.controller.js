@@ -540,7 +540,7 @@ function scoreEntry(entry, queryTokens) {
   // Coverage=0.5 (missed 1 of 2 words) -> multiplier ~0.35 (was ~0.625).
   const coverageMultiplier = coverage >= 1 ? 1 : 0.15 + 0.85 * Math.pow(coverage, 2.4);
 
-  return weightedScore * coverageMultiplier;
+  return { score: weightedScore * coverageMultiplier, fullCoverage: coverage >= 1 };
 }
 
 async function runInMemorySearch(rawSearch) {
@@ -551,17 +551,44 @@ async function runInMemorySearch(rawSearch) {
   const scored = [];
 
   for (const entry of index) {
-    const score = scoreEntry(entry, queryTokens);
-    if (score === null) continue;
-    scored.push({ business: entry.raw, score });
+    const result = scoreEntry(entry, queryTokens);
+    if (result === null) continue;
+    scored.push({ business: entry.raw, score: result.score, fullCoverage: result.fullCoverage });
   }
 
-  scored.sort((a, b) => {
+  // [FIX 13 — HARD GATE ON PARTIAL MATCHES WHEN A FULL MATCH EXISTS]
+  // ────────────────────────────────────────────────────────────────────
+  // Fix 11's steep penalty demotes partial matches (e.g. an Islamabad KFC
+  // for the query "kfc lahore") but does NOT remove them — a very strong
+  // exact-name hit (KFC matches every branch nationwide) can still survive
+  // the penalty with enough score to appear in the list at all, which is
+  // exactly the "Islamabad branch slides into Lahore results" bug.
+  //
+  // The fix: if ANY business fully satisfies every query word (e.g. a real
+  // KFC branch whose address/tags actually contain "Lahore"), then
+  // partially-matching businesses are dropped entirely from the local
+  // result set — not just demoted. Google Maps doesn't show you a
+  // same-chain branch in the wrong city when the right-city branch exists;
+  // neither should this.
+  //
+  // If NO business fully matches (e.g. searching "kfc lahore" but there's
+  // genuinely no Lahore branch in the DB yet), we fall back to showing the
+  // partial matches — better to show *something* plausible than an empty
+  // list, same rationale as the original Fix 8.
+  let finalScored = scored;
+  if (queryTokens.length > 1) {
+    const hasFullMatch = scored.some((s) => s.fullCoverage);
+    if (hasFullMatch) {
+      finalScored = scored.filter((s) => s.fullCoverage);
+    }
+  }
+
+  finalScored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     return (b.business.totalContributions || 0) - (a.business.totalContributions || 0);
   });
 
-  return scored.map((s) => ({ ...s.business, _matchScore: s.score }));
+  return finalScored.map((s) => ({ ...s.business, _matchScore: s.score }));
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
