@@ -477,10 +477,26 @@ function invalidateSearchIndex() {
 
 // Scores one business entry against the query tokens. Returns null if it's
 // not a match at all (zero tokens matched anywhere). Otherwise returns a
-// score that rewards full coverage of the query but never zeroes out a
-// business just for missing one word — a partial match (e.g. matched
-// "cheezious" but not "lahore") still scores, just lower than a full match.
-// This is what fixes "only one branch comes back" for multi-word queries.
+// score that rewards full coverage of the query and comes down HARD on
+// partial coverage — a business matching only "cheezious" out of
+// "cheezious lahore" still shows up (never silently dropped, see FIX 8
+// history above), but it can no longer out-rank or crowd out the branches
+// that actually match the whole query.
+//
+// [FIX 11 — STEEP, NON-LINEAR COVERAGE PENALTY]
+// The previous multiplier (0.25 + coverage*0.75) only cost a missed word
+// ~25-30% of the score. Since an exact business-name hit like "Cheezious"
+// already scores very high on its own (name field weight 6.0, exact token
+// match), a branch in the WRONG CITY that only matched the name still
+// ended up scoring close to branches that matched the full query — which
+// is exactly why "cheezious lahore" surfaced Islamabad/Rawalpindi branches
+// alongside (or above) the Lahore ones. A second query word is almost
+// always a strong disambiguator (city, area, sector code…), so missing it
+// should cost far more than 25%. The curve below is quadratic-ish:
+// full coverage (1.0) is untouched, but missing half a 2-word query costs
+// ~85% of the score instead of ~30%, leaving distance (applied downstream,
+// see getNearbyBusinesses/frontend finalScore) to correctly decide between
+// businesses that are otherwise tied.
 function scoreEntry(entry, queryTokens) {
   let weightedScore = 0;
   const matchedTokens = new Set();
@@ -497,7 +513,10 @@ function scoreEntry(entry, queryTokens) {
         const sim = tokenSimilarity(qt, ft);
         if (sim > best) best = sim;
       }
-      if (best > 0.3) matchedTokens.add(qt);
+      // [FIX 11] Raised from 0.3 -> 0.45 so a token only counts toward
+      // "coverage" (and therefore unlocks the full-score multiplier) when
+      // it's a genuinely meaningful match, not weak fuzzy noise.
+      if (best > 0.45) matchedTokens.add(qt);
       fieldScore += best * qw;
     }
     weightedScore += fieldScore * weight;
@@ -516,10 +535,10 @@ function scoreEntry(entry, queryTokens) {
   if (matchedTokens.size === 0) return null;
 
   const coverage = matchedTokens.size / queryTokens.length;
-  // Soft penalty, never a hard cutoff: full coverage = full score (×1.0),
-  // a half-matched two-word query still scores meaningfully (×~0.55) so it
-  // shows up — ranked below full matches — instead of disappearing.
-  const coverageMultiplier = 0.25 + coverage * 0.75;
+  // [FIX 11] Steep, non-linear penalty instead of the old flat
+  // 0.25 + coverage*0.75. Coverage=1.0 -> multiplier 1.0 (untouched).
+  // Coverage=0.5 (missed 1 of 2 words) -> multiplier ~0.35 (was ~0.625).
+  const coverageMultiplier = coverage >= 1 ? 1 : 0.15 + 0.85 * Math.pow(coverage, 2.4);
 
   return weightedScore * coverageMultiplier;
 }
