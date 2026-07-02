@@ -14,7 +14,8 @@ const {
   backfillCoordinatesGoogle,
   getSearchHistory, addSearchHistory,
   getNearbyBusinesses,
-  proxyDirections
+  proxyDirections,
+  getDrivingDistances
   
 } = require('../controllers/business.controller');
 
@@ -36,6 +37,7 @@ router.get("/nearby", getNearbyBusinesses);
 router.get('/admin/backfill-coordinates-google', backfillCoordinatesGoogle);  // ← add this
 
 router.post('/directions', proxyDirections);
+router.post('/distance-driving', getDrivingDistances);   // ← add
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public routes
