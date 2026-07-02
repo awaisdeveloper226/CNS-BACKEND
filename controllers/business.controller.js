@@ -101,6 +101,7 @@ const NEARBY_TTL_MS           = 10 * 60 * 1000; // 10 minutes
 const REVERSE_GEOCODE_TTL_MS  = 24 * 60 * 60 * 1000; // 24 hours
 const BUSINESS_DETAIL_TTL_MS  = 45 * 1000;      // 45 seconds
 const BUSINESS_INDEX_TTL_MS   = 60 * 1000;      // 60 seconds — in-memory search index refresh
+const DISTANCE_MATRIX_TTL_MS = 10 * 60 * 1000; // 10 minutes — origin+destinations pair rarely changes faster than this
 
 // Escapes regex special characters (still used by addSearchHistory's exact-match pull).
 function escapeRegex(str) {
@@ -1261,6 +1262,120 @@ function invalidateBusinessDetailCache(businessId) {
   invalidateSearchIndex();
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BATCH DRIVING DISTANCES (Routes API — computeRouteMatrix)
+// ──────────────────────────────────────────────────────────────────────────────
+// Used by SearchScreen to upgrade the top ~12 visible results from Haversine
+// (straight-line) to real driving distance, in one batched call per settled
+// search. Separate SKU/quota from Places — uses ROUTING_API, same key already
+// wired up for proxyDirections.
+// ══════════════════════════════════════════════════════════════════════════════
+const getDrivingDistances = asyncHandler(async (req, res) => {
+  const { origin, destinations } = req.body;
+
+  if (!origin || typeof origin.lat !== "number" || typeof origin.lng !== "number") {
+    return res.status(400).json({ message: "origin.lat and origin.lng are required" });
+  }
+  if (!Array.isArray(destinations) || destinations.length === 0) {
+    return res.status(200).json({ distances: {} });
+  }
+  if (!ROUTING_API) {
+    console.error("❌ ROUTING_API key missing");
+    return res.status(500).json({ message: "Server configuration error: Missing Routing API Key" });
+  }
+
+  const batch = destinations.slice(0, 25).filter(
+    (d) => d && d.id && typeof d.lat === "number" && typeof d.lng === "number"
+  );
+  if (batch.length === 0) return res.status(200).json({ distances: {} });
+
+  const cacheKey =
+    `${roundCoord(origin.lat)},${roundCoord(origin.lng)}|` +
+    batch.map((d) => `${d.id}:${roundCoord(d.lat)},${roundCoord(d.lng)}`).sort().join(",");
+
+  const cached = cacheGet("distanceMatrix", cacheKey);
+  if (cached !== undefined) {
+    console.log("✅ Distance matrix cache hit");
+    return res.status(200).json(cached);
+  }
+
+  try {
+    const result = await dedupeInFlight("distanceMatrix", cacheKey, async () => {
+      const response = await fetch(
+        "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": ROUTING_API,
+            "X-Goog-FieldMask":
+              "originIndex,destinationIndex,distanceMeters,duration,condition,status",
+          },
+          body: JSON.stringify({
+            origins: [
+              { waypoint: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } } },
+            ],
+            destinations: batch.map((d) => ({
+              waypoint: { location: { latLng: { latitude: d.lat, longitude: d.lng } } },
+            })),
+            travelMode: "DRIVE",
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`❌ Routes API distance matrix error ${response.status}:`, errText);
+        const err = new Error("Distance matrix request failed");
+        err.statusCode = 502;
+        throw err;
+      }
+
+      const rows = await response.json();
+      const distances = {};
+
+      if (Array.isArray(rows)) {
+        for (const el of rows) {
+          if (el?.condition === "ROUTE_EXISTS" && typeof el.distanceMeters === "number") {
+            const dest = batch[el.destinationIndex];
+            if (dest) distances[dest.id] = Math.round((el.distanceMeters / 1000) * 10) / 10;
+          }
+        }
+      }
+
+      const payload = { distances };
+      cacheSet("distanceMatrix", cacheKey, payload, DISTANCE_MATRIX_TTL_MS);
+      return payload;
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    if (error.statusCode === 502) {
+      return res.status(200).json({ distances: {} }); // fail silent — frontend keeps Haversine fallback
+    }
+    console.error("❌ Distance matrix fetch error:", error);
+    return res.status(200).json({ distances: {} });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 module.exports = {
   searchFoursquarePlaces,
   reverseGeocode,
@@ -1275,4 +1390,5 @@ module.exports = {
   proxyDirections,
   getNearbyBusinesses,
   invalidateBusinessDetailCache,
+  getDrivingDistances
 };
