@@ -754,9 +754,17 @@ const createBusiness = asyncHandler(async (req, res) => {
     throw new Error("Name and address are required");
   }
 
-  if (placeId) {
-    const existing = await Business.findOne({ placeId });
-    if (existing) return res.status(200).json(existing);
+if (placeId) {
+  const existing = await Business.findOne({ placeId });
+  if (existing) {
+    const hasCoords = existing.coordinates?.lat != null && existing.coordinates?.lng != null;
+    if (!hasCoords && req.body.lat != null && req.body.lng != null) {
+      existing.coordinates = { lat: req.body.lat, lng: req.body.lng };
+      await existing.save();
+      invalidateSearchIndex();
+    }
+    return res.status(200).json(existing);
+  }
 
     try {
       const business = await Business.create({
