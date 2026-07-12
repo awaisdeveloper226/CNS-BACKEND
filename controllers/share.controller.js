@@ -3,7 +3,7 @@ const asyncHandler = require("express-async-handler");
 const ShareLink = require("../models/ShareLink");
 const Business = require("../models/Business");
 
-const LINK_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const LINK_TTL_MS = 2 * 24 * 60 * 60 * 1000; // 48 hours
 
 function generateToken() {
   return crypto.randomBytes(16).toString("base64url"); // ~22 chars, unguessable
