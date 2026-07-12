@@ -7,12 +7,12 @@ const shareLinkSchema = new mongoose.Schema(
     placeId: { type: String, default: null }, // set instead of `business` for unregistered/global businesses
    businessMeta: {
   name: String,
-  guestUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   address: String,
   type: { type: String },
   coordinates: { lat: Number, lng: Number },
 },
     sharedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    guestUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     claimedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     status: { type: String, enum: ["active", "claimed", "expired", "revoked"], default: "active" },
     expiresAt: { type: Date, required: true, index: { expires: 0 } }, // TTL — Mongo auto-deletes after this
