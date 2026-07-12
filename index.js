@@ -47,6 +47,7 @@ app.use('/api/businesses', require('./routes/business.routes'));
 app.use('/api/instructions', require('./routes/instruction.routes'));
 app.use('/api/community', require('./routes/community'));
 app.use('/api/instructions/:id/comments', require('./routes/comment.routes'));
+app.use('/api/share', require('./routes/share.route'));
 
 // ==============================
 // Error Middleware (MUST be last)
