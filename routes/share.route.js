@@ -6,5 +6,6 @@ const { createShareLink, resolveShareLink, claimShareLink } = require("../contro
 router.post("/", protect, createShareLink);
 router.get("/:token", resolveShareLink);
 router.post("/:token/claim", protect, claimShareLink);
+router.post("/:token/guest-login", guestLogin);
 
 module.exports = router;
