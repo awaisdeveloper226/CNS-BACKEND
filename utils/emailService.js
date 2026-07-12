@@ -7,7 +7,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const sendOTPEmail = async (toEmail, otp, userName) => {
   try {
     const { data, error } = await resend.emails.send({
-      from: 'CNS <onboarding@resend.dev>', // Use this for testing, replace with your domain later
+      from: 'CNS Support <support@cnsroute.com>',
       to: [toEmail],
       subject: 'Your CNS Password Reset Code',
       html: `
