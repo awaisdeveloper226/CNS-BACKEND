@@ -1,7 +1,5 @@
-// backend/models/User.js
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-
 const SearchHistorySchema = new mongoose.Schema(
   {
     query: { type: String, required: true, trim: true },
@@ -9,7 +7,6 @@ const SearchHistorySchema = new mongoose.Schema(
   },
   { _id: false }
 );
-
 const UserSchema = new mongoose.Schema(
   {
     name: {
@@ -41,6 +38,10 @@ const UserSchema = new mongoose.Schema(
     contributions:       { type: Number, default: 0 },
     totalLikesReceived:  { type: Number, default: 0 },
     badges:              { type: [String], default: [] },
+    // ── Share-link guest accounts ───────────────────────
+    // true only for accounts auto-created by /api/share/:token/guest-login —
+    // used by the website to lock these sessions to a single business.
+    isGuest: { type: Boolean, default: false },
     // ── Search history (last 5 kept) ────────────────────
   searchHistory: {
   type: [
@@ -61,7 +62,6 @@ const UserSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-
 UserSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
   try {
@@ -72,9 +72,7 @@ UserSchema.pre('save', async function (next) {
     next(err);
   }
 });
-
 UserSchema.methods.matchPassword = async function (enteredPassword) {
   return bcrypt.compare(enteredPassword, this.password);
 };
-
 module.exports = mongoose.model('User', UserSchema);
