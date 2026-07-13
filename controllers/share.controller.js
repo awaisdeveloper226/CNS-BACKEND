@@ -121,6 +121,7 @@ const guestLogin = asyncHandler(async (req, res) => {
       name: `Guest via ${sharerName}`.slice(0, 50),
       email: `guest.${guestId}@share.cns.app`,
       password: crypto.randomBytes(16).toString("hex"), // hashed by the pre-save hook like any other user
+      isGuest: true,
     });
 
     guestUserId = guestUser._id;
