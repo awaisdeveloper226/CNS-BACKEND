@@ -42,6 +42,17 @@ const UserSchema = new mongoose.Schema(
     // true only for accounts auto-created by /api/share/:token/guest-login —
     // used by the website to lock these sessions to a single business.
     isGuest: { type: Boolean, default: false },
+    // ── Company / subscription (Stripe) ─────────────────
+    companyName:   { type: String, trim: true },
+    driverCount:   { type: Number },
+    isCompanyAdmin:{ type: Boolean, default: false },
+    subscriptionStatus: {
+      type: String,
+      enum: ['pending', 'active', 'past_due', 'canceled'],
+      default: 'pending',
+    },
+    stripeCustomerId:     { type: String, select: false },
+    stripeSubscriptionId: { type: String, select: false },
     // ── Search history (last 5 kept) ────────────────────
   searchHistory: {
   type: [
