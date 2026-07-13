@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 const cors = require('cors');
 const connectDB = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/error.middleware');
+const { handleStripeWebhook } = require('./controllers/payment.controller');
 
 dotenv.config();
 connectDB();
@@ -14,6 +15,16 @@ const PORT = process.env.PORT || 5000;
 // CORS Configuration
 // ==============================
 app.use(cors());
+
+// ==============================
+// Stripe Webhook
+// MUST be BEFORE express.json()
+// ==============================
+app.post(
+  '/api/payments/webhook',
+  express.raw({ type: 'application/json' }),
+  handleStripeWebhook
+);
 
 // ==============================
 // Body parsers
@@ -31,13 +42,15 @@ app.get('/', (req, res) => {
   });
 });
 
-
-// In your main server file (e.g. server.js or app.js)
-app.get("/api/health", (req, res) => {
-  res.status(200).json({ status: "ok", timestamp: Date.now() });
+// ==============================
+// API Health Check
+// ==============================
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    timestamp: Date.now(),
+  });
 });
-
-
 
 // ==============================
 // API Routes
@@ -48,6 +61,7 @@ app.use('/api/instructions', require('./routes/instruction.routes'));
 app.use('/api/community', require('./routes/community'));
 app.use('/api/instructions/:id/comments', require('./routes/comment.routes'));
 app.use('/api/share', require('./routes/share.route'));
+app.use('/api/payments', require('./routes/payment.routes'));
 
 // ==============================
 // Error Middleware (MUST be last)
