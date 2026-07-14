@@ -4,6 +4,25 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const User = require('../models/User');
 const { sendOTPEmail } = require('../utils/emailService');
 
+// @desc    Get the live per-driver price from Stripe (source of truth)
+// @route   GET /api/payments/price-info
+// @access  Public
+const getPriceInfo = asyncHandler(async (req, res) => {
+  const price = await stripe.prices.retrieve(process.env.STRIPE_PRICE_ID_MONTHLY);
+
+  if (!price || !price.active) {
+    res.status(500);
+    throw new Error('Pricing is currently unavailable');
+  }
+
+  res.status(200).json({
+    unitAmount: price.unit_amount, // in smallest currency unit (cents)
+    unitAmountDecimal: price.unit_amount / 100, // e.g. 10.00
+    currency: price.currency, // e.g. "usd"
+    interval: price.recurring?.interval || 'month', // "month" | "year"
+  });
+});
+
 // @desc    Create Stripe Checkout session for a new company signup
 // @route   POST /api/payments/create-checkout-session
 // @access  Public
@@ -27,7 +46,12 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
     mode: 'subscription',
     payment_method_types: ['card'],
     customer_email: normalizedEmail,
-    line_items: [{ price: process.env.STRIPE_PRICE_ID_MONTHLY, quantity: 1 }],
+    line_items: [
+      {
+        price: process.env.STRIPE_PRICE_ID_MONTHLY, // per-driver monthly Price in Stripe
+        quantity: driverCount,
+      },
+    ],
     metadata: {
       companyName,
       companyEmail: normalizedEmail,
@@ -38,6 +62,50 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
   });
 
   res.status(200).json({ url: session.url });
+});
+
+// @desc    Update driver count → updates Stripe subscription quantity + prorates
+// @route   PATCH /api/payments/update-driver-count
+// @access  Private (company admin)
+const updateDriverCount = asyncHandler(async (req, res) => {
+  const { driverCount } = req.body;
+
+  if (!driverCount || driverCount <= 0) {
+    res.status(400);
+    throw new Error('A valid driver count is required');
+  }
+
+  const user = await User.findById(req.user._id).select(
+    '+stripeSubscriptionId +stripeCustomerId'
+  );
+
+  if (!user) {
+    res.status(404);
+    throw new Error('User not found');
+  }
+
+  if (!user.isCompanyAdmin) {
+    res.status(403);
+    throw new Error('Only the company admin can update the driver count');
+  }
+
+  if (!user.stripeSubscriptionId) {
+    res.status(400);
+    throw new Error('No active subscription found for this account');
+  }
+
+  const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
+  const itemId = subscription.items.data[0].id;
+
+  await stripe.subscriptionItems.update(itemId, {
+    quantity: driverCount,
+    proration_behavior: 'create_prorations',
+  });
+
+  user.driverCount = driverCount;
+  await user.save();
+
+  res.status(200).json({ message: 'Driver count updated', driverCount });
 });
 
 // @desc    Stripe webhook
@@ -112,10 +180,14 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
 
     case 'customer.subscription.updated': {
       const sub = event.data.object;
-      await User.findOneAndUpdate(
-        { stripeSubscriptionId: sub.id },
-        { subscriptionStatus: sub.status === 'active' ? 'active' : sub.status }
-      );
+      const quantity = sub.items?.data?.[0]?.quantity;
+      const update = {
+        subscriptionStatus: sub.status === 'active' ? 'active' : sub.status,
+      };
+      if (typeof quantity === 'number') {
+        update.driverCount = quantity;
+      }
+      await User.findOneAndUpdate({ stripeSubscriptionId: sub.id }, update);
       break;
     }
 
@@ -144,4 +216,9 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
   res.status(200).json({ received: true });
 });
 
-module.exports = { createCheckoutSession, handleStripeWebhook };
+module.exports = {
+  getPriceInfo,
+  createCheckoutSession,
+  updateDriverCount,
+  handleStripeWebhook,
+};
