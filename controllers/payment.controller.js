@@ -27,7 +27,7 @@ const getPriceInfo = asyncHandler(async (req, res) => {
 // @route   POST /api/payments/create-checkout-session
 // @access  Public
 const createCheckoutSession = asyncHandler(async (req, res) => {
-  const { companyName, companyEmail, driverCount } = req.body;
+  const { companyName, companyEmail, driverCount, platform } = req.body; // ← add platform
 
   if (!companyName || !companyEmail || !driverCount) {
     res.status(400);
@@ -42,13 +42,22 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
     throw new Error('An active account already exists for this email. Please sign in.');
   }
 
+  // ── Pick redirect URLs by platform ──────────────────────────────────────
+  const isWeb = platform === 'web';
+  const successUrl = isWeb
+    ? process.env.WEBSITE_CHECKOUT_SUCCESS_URL
+    : `${process.env.CHECKOUT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`;
+  const cancelUrl = isWeb
+    ? process.env.WEBSITE_CHECKOUT_CANCEL_URL
+    : process.env.CHECKOUT_CANCEL_URL;
+
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
     customer_email: normalizedEmail,
     line_items: [
       {
-        price: process.env.STRIPE_PRICE_ID_MONTHLY, // per-driver monthly Price in Stripe
+        price: process.env.STRIPE_PRICE_ID_MONTHLY,
         quantity: driverCount,
       },
     ],
@@ -57,8 +66,8 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
       companyEmail: normalizedEmail,
       driverCount: String(driverCount),
     },
-    success_url: `${process.env.CHECKOUT_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: process.env.CHECKOUT_CANCEL_URL,
+    success_url: successUrl,
+    cancel_url: cancelUrl,
   });
 
   res.status(200).json({ url: session.url });
