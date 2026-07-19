@@ -58,34 +58,34 @@ const sendOTPEmail = async (toEmail, otp, userName) => {
   }
 };
 
-// @desc  Sends a subscription invoice email after a successful Stripe payment
-// @param toEmail       recipient
-// @param invoice       {
-//   businessName, businessABN,        ← your company, empty string if not set yet
-//   customerBusinessName,             ← from your User record (Stripe has no such field)
-//   invoiceNumber, date,               ← straight from Stripe's invoice object
-//   planName, gst, total, currency,    ← straight from Stripe's invoice object
-//   status                              ← always 'Paid' for this event
+// @desc  Sends a short notification email after a successful Stripe payment,
+//        pointing the customer to Stripe's own official invoice (PDF + hosted page).
+//        We do NOT rebuild the invoice ourselves — Stripe already has the
+//        business name, ABN, GST breakdown, invoice number and "Paid" status
+//        on it, sourced from your Stripe account + Tax settings.
+// @param toEmail  recipient
+// @param invoice  {
+//   customerBusinessName, invoiceNumber, date, planName,
+//   total, currency, status, hostedInvoiceUrl, invoicePdfUrl
 // }
 const sendInvoiceEmail = async (toEmail, invoice) => {
   try {
     const {
-      businessName = '',
-      businessABN = '',
       customerBusinessName = '',
       invoiceNumber = '',
       date = '',
       planName = '',
-      gst = null,
       total = '0.00',
       currency = '',
       status = 'Paid',
+      hostedInvoiceUrl = '',
+      invoicePdfUrl = '',
     } = invoice;
 
     const { data, error } = await resend.emails.send({
       from: 'CNS Billing <support@cnsroute.com>',
       to: [toEmail],
-      subject: `Invoice #${invoiceNumber} — ${businessName || 'CNS'}`,
+      subject: `Invoice #${invoiceNumber} — CNS`,
       html: `
         <!DOCTYPE html>
         <html>
@@ -96,16 +96,12 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
           </head>
           <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
             <div style="background-color: #f8f9fa; border-radius: 10px; padding: 30px; margin-top: 20px;">
-              <h2 style="color: #2c3e50; margin-bottom: 4px;">${businessName || 'CNS'}</h2>
-              ${businessABN ? `<p style="font-size: 13px; color: #6c757d; margin: 0 0 16px 0;">ABN: ${businessABN}</p>` : ''}
-              <hr style="border: none; border-top: 1px solid #dee2e6; margin: 16px 0;">
+              <h2 style="color: #2c3e50; margin-bottom: 20px;">Payment Received</h2>
+              <p style="font-size: 16px;">Hi <strong>${customerBusinessName || 'there'}</strong>,</p>
+              <p style="font-size: 16px;">Your CNS subscription payment was successful. Your official invoice is attached below.</p>
 
-              <div style="background-color: #ffffff; border-radius: 5px; padding: 20px; border: 1px solid #dee2e6;">
+              <div style="background-color: #ffffff; border-radius: 5px; padding: 20px; margin: 20px 0; border: 1px solid #dee2e6;">
                 <table style="width: 100%; font-size: 14px; border-collapse: collapse;">
-                  <tr>
-                    <td style="padding: 6px 0; color: #6c757d;">Bill to</td>
-                    <td style="padding: 6px 0; text-align: right; font-weight: 600;">${customerBusinessName || '-'}</td>
-                  </tr>
                   <tr>
                     <td style="padding: 6px 0; color: #6c757d;">Invoice #</td>
                     <td style="padding: 6px 0; text-align: right;">${invoiceNumber || '-'}</td>
@@ -118,11 +114,6 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
                     <td style="padding: 6px 0; color: #6c757d;">Subscription</td>
                     <td style="padding: 6px 0; text-align: right;">${planName}</td>
                   </tr>
-                  ${gst ? `
-                  <tr>
-                    <td style="padding: 6px 0; color: #6c757d;">GST</td>
-                    <td style="padding: 6px 0; text-align: right;">${currency} ${gst}</td>
-                  </tr>` : ''}
                   <tr style="border-top: 1px solid #dee2e6;">
                     <td style="padding: 10px 0 6px 0; font-weight: bold;">Total</td>
                     <td style="padding: 10px 0 6px 0; text-align: right; font-weight: bold; font-size: 18px; color: #007bff;">${currency} ${total}</td>
@@ -134,14 +125,20 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
                 </table>
               </div>
 
-              <p style="font-size: 14px; color: #6c757d; margin-top: 20px;">Thank you for your business.</p>
+              <div style="text-align: center; margin: 24px 0;">
+                ${hostedInvoiceUrl ? `<a href="${hostedInvoiceUrl}" style="display:inline-block; background-color:#007bff; color:#ffffff; text-decoration:none; padding:12px 24px; border-radius:5px; font-weight:600; margin: 0 8px 8px 0;">View Invoice</a>` : ''}
+                ${invoicePdfUrl ? `<a href="${invoicePdfUrl}" style="display:inline-block; background-color:#ffffff; color:#007bff; text-decoration:none; padding:12px 24px; border-radius:5px; font-weight:600; border: 1px solid #007bff;">Download PDF</a>` : ''}
+              </div>
+
+              <p style="font-size: 14px; color: #6c757d;">The linked invoice includes our business name, ABN, and GST breakdown (where applicable).</p>
+              <p style="font-size: 14px; color: #6c757d;">Thank you for your business.</p>
               <hr style="border: none; border-top: 1px solid #dee2e6; margin: 20px 0;">
               <p style="font-size: 12px; color: #999; text-align: center;">This is an automated message, please do not reply to this email.</p>
             </div>
           </body>
         </html>
       `,
-      text: `${businessName || 'CNS'}${businessABN ? ` (ABN: ${businessABN})` : ''}\n\nBill to: ${customerBusinessName || '-'}\nInvoice #: ${invoiceNumber || '-'}\nDate: ${date}\nSubscription: ${planName}${gst ? `\nGST: ${currency} ${gst}` : ''}\nTotal: ${currency} ${total}\nStatus: ${status}\n\nThank you for your business.`
+      text: `Payment Received\n\nInvoice #: ${invoiceNumber || '-'}\nDate: ${date}\nSubscription: ${planName}\nTotal: ${currency} ${total}\nStatus: ${status}\n\nView invoice: ${hostedInvoiceUrl || '-'}\nDownload PDF: ${invoicePdfUrl || '-'}\n\nThank you for your business.`
     });
 
     if (error) {
