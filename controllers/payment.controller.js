@@ -42,6 +42,23 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
     throw new Error('An account already exists for this email. Please sign in instead.');
   }
 
+  // ── NEW: create (or reuse) a real Stripe Customer with the company name.
+  // This is what makes "Customer business name" appear on the official Stripe invoice.
+  // Without this, Checkout only has an email and Stripe has nothing to put in that field.
+  let customer;
+  const existingCustomers = await stripe.customers.list({ email: normalizedEmail, limit: 1 });
+
+  if (existingCustomers.data.length > 0) {
+    customer = await stripe.customers.update(existingCustomers.data[0].id, {
+      name: companyName,
+    });
+  } else {
+    customer = await stripe.customers.create({
+      name: companyName,
+      email: normalizedEmail,
+    });
+  }
+
   const isWeb = platform === 'web';
   const successUrl = isWeb
     ? process.env.WEBSITE_CHECKOUT_SUCCESS_URL
@@ -50,16 +67,22 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
     ? process.env.WEBSITE_CHECKOUT_CANCEL_URL
     : process.env.CHECKOUT_CANCEL_URL;
 
+  // ── NEW: tax_rates on the line item is what makes GST show up on the invoice.
+  // Create a Tax Rate in the Stripe Dashboard (Product catalog → Tax rates) and
+  // put its ID in STRIPE_GST_TAX_RATE_ID. Leave the env var empty to skip tax entirely.
+  const lineItem = {
+    price: process.env.STRIPE_PRICE_ID_MONTHLY,
+    quantity: driverCount,
+  };
+  if (process.env.STRIPE_GST_TAX_RATE_ID) {
+    lineItem.tax_rates = [process.env.STRIPE_GST_TAX_RATE_ID];
+  }
+
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
-    customer_email: normalizedEmail,
-    line_items: [
-      {
-        price: process.env.STRIPE_PRICE_ID_MONTHLY,
-        quantity: driverCount,
-      },
-    ],
+    customer: customer.id, // ← was customer_email before
+    line_items: [lineItem],
     metadata: {
       companyName,
       companyEmail: normalizedEmail,
@@ -221,7 +244,10 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
       break;
     }
 
-    // ── NEW: fires on every successful invoice — first payment AND every renewal ──
+    // ── UPDATED: instead of hand-building an invoice-look-alike, we now
+    // point the customer straight at Stripe's own official invoice (PDF +
+    // hosted page), which already has your business name, ABN, GST,
+    // invoice number, date, and "Paid" status — because Stripe generated it.
     case 'invoice.payment_succeeded': {
       const invoice = event.data.object;
       const email = (invoice.customer_email || '').toLowerCase().trim();
@@ -232,26 +258,23 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
       }
 
       const user = await User.findOne({ stripeCustomerId: invoice.customer });
-
       const lineItem = invoice.lines?.data?.[0];
-      const gstAmount = invoice.tax ? (invoice.tax / 100).toFixed(2) : null; // empty if no tax configured on the invoice
 
       try {
         await sendInvoiceEmail(email, {
-          businessName: process.env.BUSINESS_NAME || '',       // set env var; empty for now
-          businessABN: process.env.BUSINESS_ABN || '',          // set env var; empty for now
-          customerBusinessName: user?.companyName || '',
-          invoiceNumber: invoice.number || '',                   // Stripe-generated, e.g. "8E43D8A2-0001"
+          customerBusinessName: user?.companyName || invoice.customer_name || '',
+          invoiceNumber: invoice.number || '',
           date: new Date(invoice.created * 1000).toLocaleDateString(),
           planName: lineItem?.description || 'CNS Subscription',
-          gst: gstAmount,
           total: (invoice.amount_paid / 100).toFixed(2),
           currency: invoice.currency.toUpperCase(),
-          status: 'Paid',
+          status: invoice.status === 'paid' ? 'Paid' : invoice.status,
+          hostedInvoiceUrl: invoice.hosted_invoice_url, // official Stripe invoice page
+          invoicePdfUrl: invoice.invoice_pdf,           // official Stripe PDF download
         });
-        console.log(`✅ Invoice email sent to ${email}`);
+        console.log(`✅ Invoice notification sent to ${email}`);
       } catch (err) {
-        console.error('❌ Failed to send invoice email:', err.message);
+        console.error('❌ Failed to send invoice notification:', err.message);
       }
       break;
     }
