@@ -59,18 +59,16 @@ const sendOTPEmail = async (toEmail, otp, userName) => {
 };
 
 // @desc  Sends a short notification email after a successful Stripe payment,
-//        pointing the customer to the official Stripe invoice PDF (invoice_pdf).
-//        We deliberately do NOT use hosted_invoice_url — that's a live Stripe
-//        webpage which itself embeds a "Receipt" button pointing to
-//        pay.stripe.com. That button opens the Stripe app when installed,
-//        requires a Stripe/Link login, and fails silently if the wrong
-//        account is already signed in on the device. invoice_pdf sidesteps
-//        all of that: it's a static file that downloads the same way for
-//        every customer, every time, app or no app, logged in or not.
+//        pointing the customer to Stripe's hosted invoice page (hosted_invoice_url).
+//        We use this instead of invoice_pdf because invoice_pdf is a
+//        time-limited, pre-signed S3 link that can expire before the
+//        customer clicks it (causing ERR_CONNECTION_RESET). The hosted page
+//        is permanent, always generates a fresh PDF on click, and also
+//        offers the customer a "Receipt" option from the same page.
 // @param toEmail  recipient
 // @param invoice  {
 //   customerBusinessName, invoiceNumber, date, planName,
-//   total, currency, status, invoicePdfUrl
+//   total, currency, status, hostedInvoiceUrl
 // }
 const sendInvoiceEmail = async (toEmail, invoice) => {
   try {
@@ -82,7 +80,7 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
       total = '0.00',
       currency = '',
       status = 'Paid',
-      invoicePdfUrl = '',
+      hostedInvoiceUrl = '',
     } = invoice;
 
     const { data, error } = await resend.emails.send({
@@ -128,12 +126,12 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
                 </table>
               </div>
 
-              ${invoicePdfUrl ? `
+              ${hostedInvoiceUrl ? `
               <div style="text-align: center; margin: 24px 0;">
-                <a href="${invoicePdfUrl}" style="display:inline-block; background-color:#007bff; color:#ffffff; text-decoration:none; padding:12px 28px; border-radius:5px; font-weight:600;">Download Invoice / Receipt (PDF)</a>
+                <a href="${hostedInvoiceUrl}" style="display:inline-block; background-color:#007bff; color:#ffffff; text-decoration:none; padding:12px 28px; border-radius:5px; font-weight:600;">View Invoice / Receipt</a>
               </div>` : ''}
 
-              <p style="font-size: 14px; color: #6c757d;">This PDF includes our business name, ABN, and GST breakdown (where applicable), and serves as your official receipt.</p>
+              <p style="font-size: 14px; color: #6c757d;">This includes our business name, ABN, and GST breakdown (where applicable), and gives you the option to download the invoice or receipt as a PDF.</p>
               <p style="font-size: 14px; color: #6c757d;">Thank you for your business.</p>
               <hr style="border: none; border-top: 1px solid #dee2e6; margin: 20px 0;">
               <p style="font-size: 12px; color: #999; text-align: center;">This is an automated message, please do not reply to this email.</p>
@@ -141,7 +139,7 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
           </body>
         </html>
       `,
-      text: `Payment Received\n\nInvoice #: ${invoiceNumber || '-'}\nDate: ${date}\nSubscription: ${planName}\nTotal: ${currency} ${total}\nStatus: ${status}\n\nDownload invoice / receipt (PDF): ${invoicePdfUrl || '-'}\n\nThank you for your business.`
+      text: `Payment Received\n\nInvoice #: ${invoiceNumber || '-'}\nDate: ${date}\nSubscription: ${planName}\nTotal: ${currency} ${total}\nStatus: ${status}\n\nView invoice / receipt: ${hostedInvoiceUrl || '-'}\n\nThank you for your business.`
     });
 
     if (error) {
