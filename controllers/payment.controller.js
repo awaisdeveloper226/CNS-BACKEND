@@ -79,18 +79,19 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
   }
 
   const session = await stripe.checkout.sessions.create({
-    mode: 'subscription',
-    payment_method_types: ['card'],
-    customer: customer.id, // ← was customer_email before
-    line_items: [lineItem],
-    metadata: {
-      companyName,
-      companyEmail: normalizedEmail,
-      driverCount: String(driverCount),
-    },
-    success_url: successUrl,
-    cancel_url: cancelUrl,
-  });
+  mode: 'subscription',
+  payment_method_types: ['card'],
+  customer: customer.id,
+  line_items: [lineItem],
+  discounts: [{ coupon: process.env.STRIPE_TEST_COUPON_ID }], // ← TEMP: remove after testing
+  metadata: {
+    companyName,
+    companyEmail: normalizedEmail,
+    driverCount: String(driverCount),
+  },
+  success_url: successUrl,
+  cancel_url: cancelUrl,
+});
 
   res.status(200).json({ url: session.url });
 });
