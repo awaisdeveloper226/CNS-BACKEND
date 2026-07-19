@@ -37,9 +37,13 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
   const normalizedEmail = companyEmail.toLowerCase().trim();
 
   const existing = await User.findOne({ email: normalizedEmail });
-  if (existing && existing.subscriptionStatus === 'active') {
+  // Block re-checkout for anyone who already has a live account — not just
+  // 'active'. 'past_due' and 'trialing' still have a real password set and
+  // should log in + fix billing from their account, not create a second
+  // Stripe subscription. Only 'canceled' (or no record) may re-subscribe.
+  if (existing && ['active', 'past_due', 'trialing'].includes(existing.subscriptionStatus)) {
     res.status(409);
-    throw new Error('An active account already exists for this email. Please sign in.');
+    throw new Error('An account already exists for this email. Please sign in instead.');
   }
 
   // ── Pick redirect URLs by platform ──────────────────────────────────────
@@ -146,13 +150,18 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
       }
 
       let user = await User.findOne({ email });
+      // Track this BEFORE we touch `user`, so we know whether this is a
+      // brand-new signup (needs a password set via OTP) or a returning
+      // account resubscribing (already has a working password — do NOT
+      // reset it or force them through the OTP flow again).
+      const isNewUser = !user;
       const randomPassword = crypto.randomBytes(20).toString('hex');
 
-      if (!user) {
+      if (isNewUser) {
         user = await User.create({
           name: companyName,
           email,
-          password: randomPassword, // hashed by pre-save hook; reset below
+          password: randomPassword, // hashed by pre-save hook; reset below via OTP
           companyName,
           driverCount,
           isCompanyAdmin: true,
@@ -169,20 +178,26 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
         await user.save();
       }
 
-      // Reuse the existing OTP mechanism as a "set your password" welcome flow
-      const otp = crypto.randomInt(100000, 999999).toString();
-      const withOtp = await User.findById(user._id).select(
-        '+resetPasswordOTP +resetPasswordOTPExpiry'
-      );
-      withOtp.resetPasswordOTP = otp;
-      withOtp.resetPasswordOTPExpiry = new Date(Date.now() + 30 * 60 * 1000);
-      await withOtp.save();
+      // Only brand-new accounts need the "set your password" welcome OTP.
+      // Existing users already have a password — sending them through the
+      // reset flow here would lock them out of the one they already know.
+      if (isNewUser) {
+        const otp = crypto.randomInt(100000, 999999).toString();
+        const withOtp = await User.findById(user._id).select(
+          '+resetPasswordOTP +resetPasswordOTPExpiry'
+        );
+        withOtp.resetPasswordOTP = otp;
+        withOtp.resetPasswordOTPExpiry = new Date(Date.now() + 30 * 60 * 1000);
+        await withOtp.save();
 
-      try {
-        await sendOTPEmail(email, otp, companyName || 'there');
-        console.log(`✅ Welcome OTP sent to ${email}`);
-      } catch (err) {
-        console.error('❌ Failed to send welcome OTP:', err.message);
+        try {
+          await sendOTPEmail(email, otp, companyName || 'there');
+          console.log(`✅ Welcome OTP sent to ${email}`);
+        } catch (err) {
+          console.error('❌ Failed to send welcome OTP:', err.message);
+        }
+      } else {
+        console.log(`✅ Existing account resubscribed, no OTP sent: ${email}`);
       }
       break;
     }
