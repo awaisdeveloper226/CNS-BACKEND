@@ -251,12 +251,16 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
       break;
     }
 
-    // Only pass invoice_pdf to the email — NOT hosted_invoice_url.
-    // hosted_invoice_url is Stripe's hosted webpage, and that page itself
-    // has a "Receipt" button pointing at pay.stripe.com — that's what was
-    // opening the Stripe app / asking for login / mismatching accounts.
-    // invoice_pdf is a static file: downloads identically for every
-    // customer, every time, app installed or not, logged in or not.
+    // Send hosted_invoice_url, NOT invoice_pdf.
+    // invoice_pdf is a time-limited, pre-signed S3 link generated at the
+    // moment we read the invoice object in this webhook — if the customer
+    // clicks it after that link has expired, S3 drops the connection
+    // (ERR_CONNECTION_RESET), which is what happened. hosted_invoice_url is
+    // a permanent Stripe-hosted page: it fetches a fresh PDF live, every
+    // time it's opened, and also offers a "Receipt" option from the same
+    // page. (Receipt only misbehaves in one narrow case — customer has the
+    // Stripe app installed AND is logged into a different account on it —
+    // which is rare and not something to design around.)
     case 'invoice.payment_succeeded': {
       const invoice = event.data.object;
       const email = (invoice.customer_email || '').toLowerCase().trim();
@@ -278,7 +282,7 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
           total: (invoice.amount_paid / 100).toFixed(2),
           currency: invoice.currency.toUpperCase(),
           status: invoice.status === 'paid' ? 'Paid' : invoice.status,
-          invoicePdfUrl: invoice.invoice_pdf, // official Stripe PDF — direct download, always
+          hostedInvoiceUrl: invoice.hosted_invoice_url, // permanent link, always fresh PDF on click
         });
         console.log(`✅ Invoice/receipt notification sent to ${email}`);
       } catch (err) {
