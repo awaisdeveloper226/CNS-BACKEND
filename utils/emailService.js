@@ -59,14 +59,18 @@ const sendOTPEmail = async (toEmail, otp, userName) => {
 };
 
 // @desc  Sends a short notification email after a successful Stripe payment,
-//        pointing the customer to Stripe's own official invoice (PDF + hosted page).
-//        We do NOT rebuild the invoice ourselves — Stripe already has the
-//        business name, ABN, GST breakdown, invoice number and "Paid" status
-//        on it, sourced from your Stripe account + Tax settings.
+//        pointing the customer to the official Stripe invoice PDF (invoice_pdf).
+//        We deliberately do NOT use hosted_invoice_url — that's a live Stripe
+//        webpage which itself embeds a "Receipt" button pointing to
+//        pay.stripe.com. That button opens the Stripe app when installed,
+//        requires a Stripe/Link login, and fails silently if the wrong
+//        account is already signed in on the device. invoice_pdf sidesteps
+//        all of that: it's a static file that downloads the same way for
+//        every customer, every time, app or no app, logged in or not.
 // @param toEmail  recipient
 // @param invoice  {
 //   customerBusinessName, invoiceNumber, date, planName,
-//   total, currency, status, hostedInvoiceUrl, invoicePdfUrl
+//   total, currency, status, invoicePdfUrl
 // }
 const sendInvoiceEmail = async (toEmail, invoice) => {
   try {
@@ -78,27 +82,26 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
       total = '0.00',
       currency = '',
       status = 'Paid',
-      hostedInvoiceUrl = '',
       invoicePdfUrl = '',
     } = invoice;
 
     const { data, error } = await resend.emails.send({
       from: 'CNS Billing <support@cnsroute.com>',
       to: [toEmail],
-      subject: `Invoice #${invoiceNumber} — CNS`,
+      subject: `Invoice / Receipt #${invoiceNumber} — CNS`,
       html: `
         <!DOCTYPE html>
         <html>
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Invoice</title>
+            <title>Invoice / Receipt</title>
           </head>
           <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
             <div style="background-color: #f8f9fa; border-radius: 10px; padding: 30px; margin-top: 20px;">
               <h2 style="color: #2c3e50; margin-bottom: 20px;">Payment Received</h2>
               <p style="font-size: 16px;">Hi <strong>${customerBusinessName || 'there'}</strong>,</p>
-              <p style="font-size: 16px;">Your CNS subscription payment was successful. Your official invoice is attached below.</p>
+              <p style="font-size: 16px;">Your CNS subscription payment was successful. Your invoice / receipt is below.</p>
 
               <div style="background-color: #ffffff; border-radius: 5px; padding: 20px; margin: 20px 0; border: 1px solid #dee2e6;">
                 <table style="width: 100%; font-size: 14px; border-collapse: collapse;">
@@ -125,12 +128,12 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
                 </table>
               </div>
 
+              ${invoicePdfUrl ? `
               <div style="text-align: center; margin: 24px 0;">
-                ${hostedInvoiceUrl ? `<a href="${hostedInvoiceUrl}" style="display:inline-block; background-color:#007bff; color:#ffffff; text-decoration:none; padding:12px 24px; border-radius:5px; font-weight:600; margin: 0 8px 8px 0;">View Invoice</a>` : ''}
-                ${invoicePdfUrl ? `<a href="${invoicePdfUrl}" style="display:inline-block; background-color:#ffffff; color:#007bff; text-decoration:none; padding:12px 24px; border-radius:5px; font-weight:600; border: 1px solid #007bff;">Download PDF</a>` : ''}
-              </div>
+                <a href="${invoicePdfUrl}" style="display:inline-block; background-color:#007bff; color:#ffffff; text-decoration:none; padding:12px 28px; border-radius:5px; font-weight:600;">Download Invoice / Receipt (PDF)</a>
+              </div>` : ''}
 
-              <p style="font-size: 14px; color: #6c757d;">The linked invoice includes our business name, ABN, and GST breakdown (where applicable).</p>
+              <p style="font-size: 14px; color: #6c757d;">This PDF includes our business name, ABN, and GST breakdown (where applicable), and serves as your official receipt.</p>
               <p style="font-size: 14px; color: #6c757d;">Thank you for your business.</p>
               <hr style="border: none; border-top: 1px solid #dee2e6; margin: 20px 0;">
               <p style="font-size: 12px; color: #999; text-align: center;">This is an automated message, please do not reply to this email.</p>
@@ -138,7 +141,7 @@ const sendInvoiceEmail = async (toEmail, invoice) => {
           </body>
         </html>
       `,
-      text: `Payment Received\n\nInvoice #: ${invoiceNumber || '-'}\nDate: ${date}\nSubscription: ${planName}\nTotal: ${currency} ${total}\nStatus: ${status}\n\nView invoice: ${hostedInvoiceUrl || '-'}\nDownload PDF: ${invoicePdfUrl || '-'}\n\nThank you for your business.`
+      text: `Payment Received\n\nInvoice #: ${invoiceNumber || '-'}\nDate: ${date}\nSubscription: ${planName}\nTotal: ${currency} ${total}\nStatus: ${status}\n\nDownload invoice / receipt (PDF): ${invoicePdfUrl || '-'}\n\nThank you for your business.`
     });
 
     if (error) {
