@@ -2,7 +2,7 @@ const asyncHandler = require('express-async-handler');
 const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const User = require('../models/User');
-const { sendOTPEmail } = require('../utils/emailService');
+const { sendOTPEmail, sendInvoiceEmail } = require('../utils/emailService');
 
 // @desc    Get the live per-driver price from Stripe (source of truth)
 // @route   GET /api/payments/price-info
@@ -16,10 +16,10 @@ const getPriceInfo = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json({
-    unitAmount: price.unit_amount, // in smallest currency unit (cents)
-    unitAmountDecimal: price.unit_amount / 100, // e.g. 10.00
-    currency: price.currency, // e.g. "usd"
-    interval: price.recurring?.interval || 'month', // "month" | "year"
+    unitAmount: price.unit_amount,
+    unitAmountDecimal: price.unit_amount / 100,
+    currency: price.currency,
+    interval: price.recurring?.interval || 'month',
   });
 });
 
@@ -27,7 +27,7 @@ const getPriceInfo = asyncHandler(async (req, res) => {
 // @route   POST /api/payments/create-checkout-session
 // @access  Public
 const createCheckoutSession = asyncHandler(async (req, res) => {
-  const { companyName, companyEmail, driverCount, platform } = req.body; // ← add platform
+  const { companyName, companyEmail, driverCount, platform } = req.body;
 
   if (!companyName || !companyEmail || !driverCount) {
     res.status(400);
@@ -37,16 +37,11 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
   const normalizedEmail = companyEmail.toLowerCase().trim();
 
   const existing = await User.findOne({ email: normalizedEmail });
-  // Block re-checkout for anyone who already has a live account — not just
-  // 'active'. 'past_due' and 'trialing' still have a real password set and
-  // should log in + fix billing from their account, not create a second
-  // Stripe subscription. Only 'canceled' (or no record) may re-subscribe.
   if (existing && ['active', 'past_due', 'trialing'].includes(existing.subscriptionStatus)) {
     res.status(409);
     throw new Error('An account already exists for this email. Please sign in instead.');
   }
 
-  // ── Pick redirect URLs by platform ──────────────────────────────────────
   const isWeb = platform === 'web';
   const successUrl = isWeb
     ? process.env.WEBSITE_CHECKOUT_SUCCESS_URL
@@ -150,10 +145,6 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
       }
 
       let user = await User.findOne({ email });
-      // Track this BEFORE we touch `user`, so we know whether this is a
-      // brand-new signup (needs a password set via OTP) or a returning
-      // account resubscribing (already has a working password — do NOT
-      // reset it or force them through the OTP flow again).
       const isNewUser = !user;
       const randomPassword = crypto.randomBytes(20).toString('hex');
 
@@ -161,7 +152,7 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
         user = await User.create({
           name: companyName,
           email,
-          password: randomPassword, // hashed by pre-save hook; reset below via OTP
+          password: randomPassword,
           companyName,
           driverCount,
           isCompanyAdmin: true,
@@ -178,9 +169,6 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
         await user.save();
       }
 
-      // Only brand-new accounts need the "set your password" welcome OTP.
-      // Existing users already have a password — sending them through the
-      // reset flow here would lock them out of the one they already know.
       if (isNewUser) {
         const otp = crypto.randomInt(100000, 999999).toString();
         const withOtp = await User.findById(user._id).select(
@@ -230,6 +218,41 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
         { stripeCustomerId: invoice.customer },
         { subscriptionStatus: 'past_due' }
       );
+      break;
+    }
+
+    // ── NEW: fires on every successful invoice — first payment AND every renewal ──
+    case 'invoice.payment_succeeded': {
+      const invoice = event.data.object;
+      const email = (invoice.customer_email || '').toLowerCase().trim();
+
+      if (!email) {
+        console.error('❌ Invoice paid but no customer_email on invoice', invoice.id);
+        break;
+      }
+
+      const user = await User.findOne({ stripeCustomerId: invoice.customer });
+
+      const lineItem = invoice.lines?.data?.[0];
+      const gstAmount = invoice.tax ? (invoice.tax / 100).toFixed(2) : null; // empty if no tax configured on the invoice
+
+      try {
+        await sendInvoiceEmail(email, {
+          businessName: process.env.BUSINESS_NAME || '',       // set env var; empty for now
+          businessABN: process.env.BUSINESS_ABN || '',          // set env var; empty for now
+          customerBusinessName: user?.companyName || '',
+          invoiceNumber: invoice.number || '',                   // Stripe-generated, e.g. "8E43D8A2-0001"
+          date: new Date(invoice.created * 1000).toLocaleDateString(),
+          planName: lineItem?.description || 'CNS Subscription',
+          gst: gstAmount,
+          total: (invoice.amount_paid / 100).toFixed(2),
+          currency: invoice.currency.toUpperCase(),
+          status: 'Paid',
+        });
+        console.log(`✅ Invoice email sent to ${email}`);
+      } catch (err) {
+        console.error('❌ Failed to send invoice email:', err.message);
+      }
       break;
     }
 
