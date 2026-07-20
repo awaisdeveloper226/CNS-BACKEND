@@ -58,6 +58,24 @@ const UserSchema = new mongoose.Schema(
     // user how long they keep access. Not select:false since it's shown
     // directly in the profile.
     subscriptionEndsAt:   { type: Date, default: null },
+    // ── Device tracking (shared account usage) ──────────
+    // One device entry per distinct browser/device that has ever logged in.
+    // lastLoginAt updates on every login from a known device; a brand new
+    // deviceId pushes a new entry and bumps totalDevices.
+    devices: {
+      type: [
+        {
+          deviceId:    { type: String, required: true },
+          userAgent:   { type: String },
+          platform:    { type: String },
+          firstSeenAt: { type: Date, default: Date.now },
+          lastLoginAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+      select: true,
+    },
+    totalDevices: { type: Number, default: 0 },
     // ── Search history (last 5 kept) ────────────────────
   searchHistory: {
   type: [
