@@ -53,6 +53,11 @@ const UserSchema = new mongoose.Schema(
     },
     stripeCustomerId:     { type: String, select: false },
     stripeSubscriptionId: { type: String, select: false },
+    // Set when a cancellation is confirmed — the current billing period's
+    // end date pulled from Stripe at that moment, so the UI can tell the
+    // user how long they keep access. Not select:false since it's shown
+    // directly in the profile.
+    subscriptionEndsAt:   { type: Date, default: null },
     // ── Search history (last 5 kept) ────────────────────
   searchHistory: {
   type: [
