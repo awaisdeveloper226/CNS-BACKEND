@@ -48,7 +48,7 @@ const registerUser = asyncHandler(async (req, res) => {
 // @access  Public
 // =====================================================
 const loginUser = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, deviceId, userAgent, platform } = req.body;
 
   if (!email || !password) {
     res.status(400);
@@ -62,6 +62,32 @@ const loginUser = asyncHandler(async (req, res) => {
     res.status(401);
     throw new Error('Invalid email or password');
   }
+
+  // ── Device tracking ────────────────────────────────────────────────────
+  // Every distinct deviceId (persisted client-side in localStorage) either
+  // refreshes its lastLoginAt or gets added as a new entry. totalDevices is
+  // kept in sync as a simple denormalized count for easy display.
+  if (deviceId) {
+    const existingDevice = user.devices.find((d) => d.deviceId === deviceId);
+    const now = new Date();
+
+    if (existingDevice) {
+      existingDevice.lastLoginAt = now;
+      if (userAgent) existingDevice.userAgent = userAgent;
+      if (platform)  existingDevice.platform  = platform;
+    } else {
+      user.devices.push({
+        deviceId,
+        userAgent: userAgent || 'unknown',
+        platform:  platform  || 'unknown',
+        firstSeenAt: now,
+        lastLoginAt: now,
+      });
+    }
+    user.totalDevices = user.devices.length;
+    await user.save();
+  }
+  // ───────────────────────────────────────────────────────────────────────
 
   res.json({ token: generateToken(user._id) });
 });
