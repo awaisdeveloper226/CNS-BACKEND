@@ -67,9 +67,17 @@ const UserSchema = new mongoose.Schema(
     // ── Password reset OTP ──────────────────────────────
     resetPasswordOTP:       { type: String, default: null, select: false },
     resetPasswordOTPExpiry: { type: Date,   default: null, select: false },
-    // ── OTP rate limiting ───────────────────────────────
+    // ── OTP rate limiting (password reset) ──────────────
     otpRequestCount:        { type: Number, default: 0,    select: false },
     otpWindowStart:         { type: Date,   default: null, select: false },
+    // ── Subscription-cancellation OTP ───────────────────
+    // Kept separate from the password-reset OTP fields/counters above on
+    // purpose, so requesting one code never eats into or resets the rate
+    // limit for the other.
+    cancelSubscriptionOTP:       { type: String, default: null, select: false },
+    cancelSubscriptionOTPExpiry: { type: Date,   default: null, select: false },
+    cancelOtpRequestCount:       { type: Number, default: 0,    select: false },
+    cancelOtpWindowStart:        { type: Date,   default: null, select: false },
   },
   { timestamps: true }
 );
