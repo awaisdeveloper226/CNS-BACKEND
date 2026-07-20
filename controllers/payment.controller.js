@@ -229,7 +229,7 @@ const confirmCancellation = asyncHandler(async (req, res) => {
   }
 
   const user = await User.findById(req.user._id).select(
-    '+cancelSubscriptionOTP +cancelSubscriptionOTPExpiry'
+    '+cancelSubscriptionOTP +cancelSubscriptionOTPExpiry +stripeSubscriptionId'
   );
 
   if (!user || !user.cancelSubscriptionOTP || !user.cancelSubscriptionOTPExpiry) {
@@ -258,12 +258,31 @@ const confirmCancellation = asyncHandler(async (req, res) => {
     throw new Error('There is no active subscription to cancel');
   }
 
+  // The subscription is still live in Stripe (we're not calling
+  // stripe.subscriptions.cancel() yet — see TODO below), so its
+  // current_period_end is just the normal, already-paid-for end of this
+  // billing cycle. That's exactly the date we want to show the user as
+  // "you keep access until…".
+  let subscriptionEndsAt = user.subscriptionEndsAt || null;
+  if (user.stripeSubscriptionId) {
+    try {
+      const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
+      if (subscription?.current_period_end) {
+        subscriptionEndsAt = new Date(subscription.current_period_end * 1000);
+      }
+    } catch (err) {
+      console.error('⚠️ Could not fetch Stripe period end for cancellation message:', err.message);
+      // Not fatal — cancellation still proceeds, just without a specific date.
+    }
+  }
+
   // ⚠️ TODO: this only updates our own status field for now — it does not
   // call stripe.subscriptions.cancel / update(). Wire that up here once
   // ready to actually stop billing in Stripe (and probably let the
   // 'customer.subscription.deleted' webhook be the source of truth instead
   // of setting this directly).
   user.subscriptionStatus = 'canceled';
+  user.subscriptionEndsAt = subscriptionEndsAt;
   user.cancelSubscriptionOTP = null;
   user.cancelSubscriptionOTPExpiry = null;
   user.cancelOtpRequestCount = 0;
@@ -271,7 +290,11 @@ const confirmCancellation = asyncHandler(async (req, res) => {
   await user.save();
 
   console.log(`✅ Subscription marked canceled for ${user.email} (status field only — Stripe not yet called)`);
-  res.status(200).json({ message: 'Subscription canceled', subscriptionStatus: user.subscriptionStatus });
+  res.status(200).json({
+    message: 'Subscription canceled',
+    subscriptionStatus: user.subscriptionStatus,
+    subscriptionEndsAt: user.subscriptionEndsAt,
+  });
 });
 
 // @desc    Stripe webhook
