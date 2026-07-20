@@ -2,7 +2,14 @@ const asyncHandler = require('express-async-handler');
 const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const User = require('../models/User');
-const { sendOTPEmail, sendInvoiceEmail } = require('../utils/emailService');
+const { sendOTPEmail, sendCancellationOTPEmail, sendInvoiceEmail } = require('../utils/emailService');
+
+// ── Cancellation OTP config ─────────────────────────────────────────────────
+// Kept separate from the password-reset OTP constants in auth.controller.js
+// on purpose — same shape, different counters/fields, so the two flows never
+// interfere with each other's rate limits.
+const CANCEL_OTP_LIMIT     = 3;              // max requests per window
+const CANCEL_OTP_WINDOW_MS = 60 * 60 * 1000; // 1 hour in ms
 
 // @desc    Get the live per-driver price from Stripe (source of truth)
 // @route   GET /api/payments/price-info
@@ -144,6 +151,127 @@ const updateDriverCount = asyncHandler(async (req, res) => {
   await user.save();
 
   res.status(200).json({ message: 'Driver count updated', driverCount });
+});
+
+// @desc    Send an OTP to the logged-in user's email to confirm they want to
+//          cancel their subscription. Step 1 of 2 — nothing is canceled here.
+// @route   POST /api/payments/request-cancellation-otp
+// @access  Private
+const requestCancellationOtp = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id).select(
+    '+cancelSubscriptionOTP +cancelSubscriptionOTPExpiry +cancelOtpRequestCount +cancelOtpWindowStart'
+  );
+
+  if (!user) {
+    res.status(404);
+    throw new Error('User not found');
+  }
+
+  if (user.subscriptionStatus !== 'active') {
+    res.status(400);
+    throw new Error('There is no active subscription to cancel');
+  }
+
+  // ── Rate limit check (mirrors forgotPassword's, own counters) ────────────
+  const now = Date.now();
+  const windowStart = user.cancelOtpWindowStart ? user.cancelOtpWindowStart.getTime() : 0;
+  const windowExpiry = windowStart + CANCEL_OTP_WINDOW_MS;
+  const inWindow = now < windowExpiry;
+
+  if (inWindow && user.cancelOtpRequestCount >= CANCEL_OTP_LIMIT) {
+    const minutesLeft = Math.ceil((windowExpiry - now) / 60000);
+    res.status(429);
+    throw new Error(
+      `Too many code requests. Please try again in ${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}.`
+    );
+  }
+
+  if (!inWindow) {
+    user.cancelOtpWindowStart = new Date(now);
+    user.cancelOtpRequestCount = 1;
+  } else {
+    user.cancelOtpRequestCount += 1;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const otp = crypto.randomInt(100000, 999999).toString();
+  user.cancelSubscriptionOTP = otp;
+  user.cancelSubscriptionOTPExpiry = new Date(now + 10 * 60 * 1000); // 10 min
+  await user.save();
+
+  try {
+    await sendCancellationOTPEmail(user.email, otp, user.name);
+    console.log(`✅ Cancellation OTP sent to ${user.email} (${user.cancelOtpRequestCount}/${CANCEL_OTP_LIMIT} this hour)`);
+    res.status(200).json({ message: 'A confirmation code has been sent to your email' });
+  } catch (err) {
+    console.error('❌ Cancellation OTP email failed:', err.message);
+    // Roll back count so a send failure doesn't eat one of their attempts
+    user.cancelOtpRequestCount = Math.max(0, user.cancelOtpRequestCount - 1);
+    user.cancelSubscriptionOTP = null;
+    user.cancelSubscriptionOTPExpiry = null;
+    await user.save();
+    res.status(500);
+    throw new Error('Failed to send confirmation email. Please try again.');
+  }
+});
+
+// @desc    Verify the cancellation OTP and cancel the subscription.
+//          Step 2 of 2 — for now this only flips subscriptionStatus locally;
+//          it does NOT call Stripe to actually cancel billing yet.
+// @route   POST /api/payments/confirm-cancellation
+// @access  Private
+const confirmCancellation = asyncHandler(async (req, res) => {
+  const { otp } = req.body;
+
+  if (!otp) {
+    res.status(400);
+    throw new Error('Confirmation code is required');
+  }
+
+  const user = await User.findById(req.user._id).select(
+    '+cancelSubscriptionOTP +cancelSubscriptionOTPExpiry'
+  );
+
+  if (!user || !user.cancelSubscriptionOTP || !user.cancelSubscriptionOTPExpiry) {
+    res.status(400);
+    throw new Error('Invalid or expired code. Please request a new one.');
+  }
+
+  if (new Date() > user.cancelSubscriptionOTPExpiry) {
+    user.cancelSubscriptionOTP = null;
+    user.cancelSubscriptionOTPExpiry = null;
+    await user.save();
+    res.status(400);
+    throw new Error('Code has expired. Please request a new one.');
+  }
+
+  if (user.cancelSubscriptionOTP !== otp.trim()) {
+    res.status(400);
+    throw new Error('Invalid code. Please check and try again.');
+  }
+
+  if (user.subscriptionStatus !== 'active') {
+    user.cancelSubscriptionOTP = null;
+    user.cancelSubscriptionOTPExpiry = null;
+    await user.save();
+    res.status(400);
+    throw new Error('There is no active subscription to cancel');
+  }
+
+  // ⚠️ TODO: this only updates our own status field for now — it does not
+  // call stripe.subscriptions.cancel / update(). Wire that up here once
+  // ready to actually stop billing in Stripe (and probably let the
+  // 'customer.subscription.deleted' webhook be the source of truth instead
+  // of setting this directly).
+  user.subscriptionStatus = 'canceled';
+  user.cancelSubscriptionOTP = null;
+  user.cancelSubscriptionOTPExpiry = null;
+  user.cancelOtpRequestCount = 0;
+  user.cancelOtpWindowStart = null;
+  await user.save();
+
+  console.log(`✅ Subscription marked canceled for ${user.email} (status field only — Stripe not yet called)`);
+  res.status(200).json({ message: 'Subscription canceled', subscriptionStatus: user.subscriptionStatus });
 });
 
 // @desc    Stripe webhook
@@ -302,5 +430,7 @@ module.exports = {
   getPriceInfo,
   createCheckoutSession,
   updateDriverCount,
+  requestCancellationOtp,
+  confirmCancellation,
   handleStripeWebhook,
 };
