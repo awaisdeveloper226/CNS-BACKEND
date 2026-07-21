@@ -51,6 +51,14 @@ const UserSchema = new mongoose.Schema(
       enum: ['pending', 'active', 'past_due', 'canceled'],
       default: 'pending',
     },
+    // True from the moment a cancellation is confirmed until either (a) the
+    // user reactivates before the period ends, or (b) Stripe actually ends
+    // the subscription and the webhook deletes this document. This is the
+    // single flag that distinguishes "canceled, still in grace period" from
+    // any other meaning of subscriptionStatus === 'canceled'. Always kept in
+    // sync with Stripe's own cancel_at_period_end via the webhook — never
+    // trust a stale local copy for anything destructive.
+    cancelAtPeriodEnd: { type: Boolean, default: false },
     stripeCustomerId:     { type: String, select: false },
     stripeSubscriptionId: { type: String, select: false },
     // Set when a cancellation is confirmed — the current billing period's
