@@ -150,8 +150,9 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
     }
 
     const payload = await dedupeInFlight('instructionsByBusiness', businessId, async () => {
+        // NEW: userName/userLevel are now stored directly on the Instruction
+        // document (denormalized at creation time), so no more populate('user').
         const instructions = await Instruction.find({ business: businessId })
-            .populate('user', 'name level')
             .sort({ createdAt: -1 });
 
         const instructionIds = instructions.map(i => i._id);
@@ -167,9 +168,9 @@ const getInstructionsByBusiness = asyncHandler(async (req, res) => {
 
         const result = instructions.map(i => ({
             id: i._id.toString(),
-            userId: i.user?._id,
-            userName: i.user?.name || 'Anonymous',
-            userLevel: i.user?.level || 1,
+            userId: i.user?.toString(),
+            userName: i.userName || 'Anonymous',
+            userLevel: i.userLevel || 1,
             notes: i.notes,
             audioUrl: i.audioUrl,
             audioDuration: i.audioDuration,
@@ -212,8 +213,8 @@ const getInstructionById = asyncHandler(async (req, res) => {
     }
 
     const result = await dedupeInFlight('instructionDetail', id, async () => {
-        const instruction = await Instruction.findById(id)
-            .populate('user', 'name level');
+        // NEW: no more populate('user') — userName/userLevel live on the doc.
+        const instruction = await Instruction.findById(id);
 
         if (!instruction) {
             const err = new Error('Instruction not found');
@@ -225,9 +226,9 @@ const getInstructionById = asyncHandler(async (req, res) => {
 
         const payload = {
             id: instruction._id.toString(),
-            userId: instruction.user?._id?.toString(),
-            userName: instruction.user?.name || 'Anonymous',
-            userLevel: instruction.user?.level || 1,
+            userId: instruction.user?.toString(),
+            userName: instruction.userName || 'Anonymous',
+            userLevel: instruction.userLevel || 1,
             notes: instruction.notes,
             audioUrl: instruction.audioUrl,
             audioDuration: instruction.audioDuration,
@@ -296,6 +297,10 @@ const createInstruction = asyncHandler(async (req, res) => {
             [{
                 business: businessId,
                 user: userId,
+                // NEW: snapshot the author's name/level onto the instruction
+                // itself, so it stays independent of the User doc later.
+                userName: req.user.name,
+                userLevel: req.user.level ?? 1,
                 notes: notes || '',
                 audioUrl: audioUrl || null,
                 audioDuration: audioDuration || null,
