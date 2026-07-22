@@ -74,12 +74,24 @@ const claimShareLink = asyncHandler(async (req, res) => {
     throw new Error("This link has expired.");
   }
 
+  const isSameGuestGeneratedByThisLink =
+    link.guestUser && String(link.guestUser) === String(link.claimedBy);
+
   if (!link.claimedBy) {
     // First person to open it — binds the link to them
     link.claimedBy = req.user._id;
     link.status = "claimed";
     await link.save();
-  } else if (String(link.claimedBy) !== String(req.user._id)) {
+  } else if (String(link.claimedBy) === String(req.user._id)) {
+    // Already bound to this exact account — nothing to do
+  } else if (isSameGuestGeneratedByThisLink && !req.user.isGuest) {
+    // The web fallback silently claimed this link for an auto-created guest
+    // before the real app opened it. A real logged-in user opening the same
+    // link is the same person completing the same visit, not a different
+    // recipient — hand the link over to their real account.
+    link.claimedBy = req.user._id;
+    await link.save();
+  } else {
     // Anyone else — including a forwarded copy of the link — is rejected
     res.status(403);
     throw new Error("This link is no longer valid for your account.");
