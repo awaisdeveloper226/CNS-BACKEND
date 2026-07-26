@@ -78,12 +78,14 @@ const UserSchema = new mongoose.Schema(
           platform:    { type: String },
           firstSeenAt: { type: Date, default: Date.now },
           lastLoginAt: { type: Date, default: Date.now },
+          isActive:    { type: Boolean, default: true },
         },
       ],
       default: [],
       select: true,
     },
     totalDevices: { type: Number, default: 0 },
+    activeDevices: { type: Number, default: 0, min: 0 }, 
     // ── Search history (last 5 kept) ────────────────────
   searchHistory: {
   type: [
