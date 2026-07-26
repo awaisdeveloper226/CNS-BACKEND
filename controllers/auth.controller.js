@@ -64,9 +64,11 @@ const loginUser = asyncHandler(async (req, res) => {
   }
 
   // ── Device tracking ────────────────────────────────────────────────────
-  // Every distinct deviceId (persisted client-side in localStorage) either
-  // refreshes its lastLoginAt or gets added as a new entry. totalDevices is
-  // kept in sync as a simple denormalized count for easy display.
+  // Every distinct deviceId (persisted client-side) either refreshes its
+  // lastLoginAt or gets added as a new entry. isActive marks it as
+  // currently "logged in" (not "online" — just not yet logged out).
+  // totalDevices / activeDevices are kept in sync as simple denormalized
+  // counts for easy display.
   if (deviceId) {
     const existingDevice = user.devices.find((d) => d.deviceId === deviceId);
     const now = new Date();
@@ -75,6 +77,10 @@ const loginUser = asyncHandler(async (req, res) => {
       existingDevice.lastLoginAt = now;
       if (userAgent) existingDevice.userAgent = userAgent;
       if (platform)  existingDevice.platform  = platform;
+      if (!existingDevice.isActive) {
+        existingDevice.isActive = true;
+        user.activeDevices += 1;
+      }
     } else {
       user.devices.push({
         deviceId,
@@ -82,7 +88,9 @@ const loginUser = asyncHandler(async (req, res) => {
         platform:  platform  || 'unknown',
         firstSeenAt: now,
         lastLoginAt: now,
+        isActive: true,
       });
+      user.activeDevices += 1;
     }
     user.totalDevices = user.devices.length;
     await user.save();
@@ -90,6 +98,27 @@ const loginUser = asyncHandler(async (req, res) => {
   // ───────────────────────────────────────────────────────────────────────
 
   res.json({ token: generateToken(user._id) });
+});
+
+// =====================================================
+// @desc    Log out a device
+// @route   POST /api/auth/logout
+// @access  Private
+// =====================================================
+const logoutUser = asyncHandler(async (req, res) => {
+  const { deviceId } = req.body;
+  const user = req.user; // populated by the protect middleware
+
+  if (deviceId) {
+    const device = user.devices.find((d) => d.deviceId === deviceId);
+    if (device && device.isActive) {
+      device.isActive = false;
+      user.activeDevices = Math.max(0, user.activeDevices - 1);
+      await user.save();
+    }
+  }
+
+  res.status(200).json({ message: 'Logged out' });
 });
 
 // =====================================================
@@ -229,6 +258,7 @@ const resetPassword = asyncHandler(async (req, res) => {
 module.exports = {
   registerUser,
   loginUser,
+  logoutUser,
   getMe,
   forgotPassword,
   resetPassword,
