@@ -100,9 +100,9 @@ const createCheckoutSession = asyncHandler(async (req, res) => {
   // emails without charging a real card. REMOVE this block (and unset
   // STRIPE_TEST_COUPON_ID in your env) before going fully live, or every
   // real signup will be free.
-  if (process.env.STRIPE_TEST_COUPON_ID) {
-    sessionParams.discounts = [{ coupon: process.env.STRIPE_TEST_COUPON_ID }];
-  }
+  // if (process.env.STRIPE_TEST_COUPON_ID) {
+  //   sessionParams.discounts = [{ coupon: process.env.STRIPE_TEST_COUPON_ID }];
+  // }
 
   const session = await stripe.checkout.sessions.create(sessionParams);
 
